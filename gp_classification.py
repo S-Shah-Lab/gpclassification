@@ -36,7 +36,6 @@ from __future__ import annotations
 # ---------------------- Imports ----------------------
 import json
 import math
-import os
 from copy import deepcopy
 import datetime as dt
 from dataclasses import dataclass, asdict
@@ -67,12 +66,16 @@ import tensorflow as tf
 from sklearn.metrics import (
     accuracy_score,
     brier_score_loss,
-    precision_recall_curve,
-    roc_auc_score,
+    confusion_matrix,
     roc_curve,
+    roc_auc_score,
+    precision_recall_curve,
+    auc,
+    average_precision_score,
 )
 from sklearn.model_selection import train_test_split
 import gpflow
+from scipy.interpolate import griddata
 
 from kernels import CustomKernel  # custom covariance function
 
@@ -315,8 +318,6 @@ class GPClassificationRunner:
         self.kernel: Optional[CustomKernel] = None
 
         # Outputs and logs
-        self.W_over_iters: List[np.ndarray] = []  # list of (s, nf)
-
         self.p_train_seq: List[np.ndarray] = []  # list of probabilty arrays (N_train,)
         self.p_val_seq: List[np.ndarray] = []  # (N_val,)
         self.p_test_seq: List[np.ndarray] = []  # (N_test,)
@@ -348,10 +349,19 @@ class GPClassificationRunner:
 
         self._initialize_W_matrix()  # W_init
         self._train()
-        # self._make_visual_summary()  # Visual outputs
         self._write_config_file()  # Write config file to `config.json`
         self._build_and_write_runlog()  # Build and write RunLog
+
+        self._make_visual_summary()  # Visual outputs
+
         self._print_message(which="end")
+
+    def _make_visual_summary(self) -> None:
+        """
+        Generate visual outputs as summary of the training process (PNGs + GIFs)
+        """
+        self._plot_learning_curves()
+        self._threshold_sweep()
 
     # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
     # ~~~~~~~~~~~~~~~ Low level methods ~~~~~~~~~~~~~~~
@@ -1377,3 +1387,275 @@ class GPClassificationRunner:
         _ensure_dir(self.run_dir)
         with open(self.run_dir / "run_log.json", "w") as f:
             json.dump(asdict(self.run_log), f, indent=2)
+
+    # ----------------- Visual Summary ----------------- #
+    def _plot_learning_curves(self) -> None:
+        """
+        Plot curves used in training process
+        """
+        fig, ax1 = plt.subplots(figsize=(8, 4.5))
+        # -------------------------------------------------------
+        steps = [l.step for l in self.run_log.logs]
+        nlml = [l.nlml for l in self.run_log.logs]
+        ax1.plot(steps, nlml, linewidth=2, color="black", label="NLML")
+        ax1.set_xlabel("Iteration")
+        ax1.set_ylabel("Neg-ELBO")
+        ax1.set_xlim(0, max(steps) if steps else self.maxiter)
+        # -------------------------------------------------------
+        ax2 = ax1.twinx()
+        acc_train = [l.acc_train for l in self.run_log.logs]
+        ax2.plot(
+            steps,
+            acc_train,
+            linestyle="--",
+            linewidth=2,
+            color="blue",
+            label="train",
+        )
+
+        if self.has_val:
+            acc_val = [l.acc_val for l in self.run_log.logs]
+            ax2.plot(
+                steps,
+                acc_val,
+                linestyle="--",
+                linewidth=2,
+                color="darkgreen",
+                label="val",
+            )
+
+        if self.has_test:
+            acc_test = [l.acc_test for l in self.run_log.logs]
+            ax2.plot(
+                steps,
+                acc_test,
+                linestyle="--",
+                linewidth=2,
+                color="red",
+                label="test",
+            )
+
+        ax2.set_ylim(0, 1)
+        ax2.set_ylabel("Accuracy")
+        lines = ax1.get_lines() + ax2.get_lines()
+        ax1.legend(lines, [l.get_label() for l in lines], loc="best")
+        fig.tight_layout()
+        fig.savefig(self.run_dir / "01_learning_curves.png", dpi=150)
+        plt.close(fig)
+
+    def _threshold_sweep(self, verbose: bool = False) -> None:
+        """
+        Plot threshold sweeps for Accuracy, Precision, Recall, F1, Specificity, Youden's J for train
+        and for val/test if available Uses probabilities from the best iteration
+        """
+
+        # Define some helper methods
+        def _fmt(x) -> str:
+            return f"{x:.3f}" if (x is not None and np.isfinite(x)) else "/"
+
+        def _get_split(name: str) -> Tuple:
+            """
+            Return (y, p) for split; None if split missing
+            """
+            if name == "train":
+                y = self.Y_train.ravel().astype(int)
+                p = np.array(self.run_log.p_train_best)
+            elif name == "val":
+                if not getattr(self, "has_val", False):
+                    return None, None
+                y = self.Y_val.ravel().astype(int)
+                p = np.array(self.run_log.p_val_best)
+            else:  # "test"
+                if not getattr(self, "has_test", False):
+                    return None, None
+                y = self.Y_test.ravel().astype(int)
+                p = np.array(self.run_log.p_test_best)
+            return y, p
+
+        def _aucs(y: np.ndarray, p: np.ndarray) -> Tuple:
+            """
+            Return (ROC-AUC, PR-AUC) or (None, None) if not computable
+            """
+            if y is None or p is None or len(p) == 0:
+                return None, None
+            roc = None
+            ap = None
+            try:
+                roc = float(roc_auc_score(y, p))
+            except Exception:
+                pass
+            try:
+                ap = float(average_precision_score(y, p))
+            except Exception:
+                pass
+            return roc, ap
+
+        # Generate threshold grid, with 51 points delta threshold is 0.02
+        thr_seq = np.linspace(0.0, 1.0, 51)
+
+        def _metrics_at_all_thresholds(y: np.ndarray, p: np.ndarray) -> Dict:
+            """
+            Compute arrays for all thresholds; NaNs if split missing
+            """
+            if y is None or p is None or len(p) == 0:
+                nan = np.full_like(thr_seq, np.nan, dtype=float)
+                return {
+                    "acc": nan,
+                    "prec": nan,
+                    "rec": nan,
+                    "f1": nan,
+                    "spec": nan,
+                    "youden": nan,
+                }
+            out = {"acc": [], "prec": [], "rec": [], "f1": [], "spec": [], "youden": []}
+            y = y.astype(int)
+            for th in thr_seq:
+                yhat = (p >= th).astype(int)
+                TP = np.sum((yhat == 1) & (y == 1))
+                FP = np.sum((yhat == 1) & (y == 0))
+                TN = np.sum((yhat == 0) & (y == 0))
+                FN = np.sum((yhat == 0) & (y == 1))
+                N = len(y)
+
+                acc = (TP + TN) / N if N else np.nan
+                precision = TP / (TP + FP) if (TP + FP) > 0 else np.nan
+                recall = TP / (TP + FN) if (TP + FN) > 0 else 0.0  # TPR
+                f1 = (
+                    (2 * precision * recall / (precision + recall))
+                    if (not np.isnan(precision) and (precision + recall) > 0)
+                    else np.nan
+                )
+                specificity = TN / (TN + FP) if (TN + FP) > 0 else np.nan
+                fpr = FP / (FP + TN) if (FP + TN) > 0 else 0.0
+                youden = recall - fpr  # TPR - FPR
+
+                out["acc"].append(acc)
+                out["prec"].append(precision)
+                out["rec"].append(recall)
+                out["f1"].append(f1)
+                out["spec"].append(specificity)
+                out["youden"].append(youden)
+
+            for k in out:
+                out[k] = np.asarray(out[k], dtype=float)
+            return out
+
+        def _best_idx(arr: np.ndarray) -> int:
+            """
+            Index of maximum, treating NaNs as -inf; earliest index when multiple possibilities
+            """
+            arr = np.asarray(arr, dtype=float)
+            scores = np.where(np.isnan(arr), -np.inf, arr)
+            idxs = np.where(scores == np.max(scores))[0]
+            return int(idxs[0]) if idxs.size else 0
+
+        y_tr, p_tr = _get_split("train")
+        y_va, p_va = _get_split("val")
+        y_te, p_te = _get_split("test")
+
+        auc_tr, ap_tr = _aucs(y_tr, p_tr)
+        auc_va, ap_va = _aucs(y_va, p_va)
+        auc_te, ap_te = _aucs(y_te, p_te)
+
+        met_tr = _metrics_at_all_thresholds(y_tr, p_tr)
+        met_va = _metrics_at_all_thresholds(y_va, p_va) if self.has_val else None
+        met_te = _metrics_at_all_thresholds(y_te, p_te) if self.has_test else None
+
+        # Plot
+        fig, axes = plt.subplots(3, 2, figsize=(10.5, 9.0), sharex=True)
+        axes = axes.ravel()
+        items = [
+            ("Accuracy", "acc", (0.0, 1.0)),
+            ("Precision", "prec", (0.0, 1.0)),
+            ("Recall (TPR)", "rec", (0.0, 1.0)),
+            ("F1 score", "f1", (0.0, 1.0)),
+            ("Specificity", "spec", (0.0, 1.0)),
+            ("Youden's J", "youden", (-1.0, 1.0)),
+        ]
+        items_dict = {lbl: ylim for (lbl, _, ylim) in items}
+        COLORS = {"train": "blue", "val": "green", "test": "orange"}
+
+        def _legend_label(split_name: str, vals: np.ndarray):
+            """
+            Return legend string 'split: t*=x val=y' with fallbacks
+            """
+            if vals is None or not np.isfinite(vals).any():
+                return f"{split_name}: t*=/ val=/", None, None
+            j = _best_idx(vals)
+            t_star = thr_seq[j]
+            v_star = vals[j]
+            return f"{split_name}: t*={_fmt(t_star)}  val={_fmt(v_star)}", j, v_star
+
+        def _plot_one(ax, label, key):
+            # train
+            lab_tr, j_tr, v_tr = _legend_label("train", met_tr[key])
+            ax.plot(thr_seq, met_tr[key], color=COLORS["train"], lw=2, label=lab_tr)
+            if j_tr is not None and np.isfinite(v_tr):
+                ax.plot(thr_seq[j_tr], v_tr, "o", color=COLORS["train"], ms=6)
+
+            # val
+            if self.has_val and met_va is not None:
+                lab_va, j_va, v_va = _legend_label("val", met_va[key])
+                ax.plot(thr_seq, met_va[key], color=COLORS["val"], lw=2, label=lab_va)
+                if j_va is not None and np.isfinite(v_va):
+                    ax.plot(thr_seq[j_va], v_va, "o", color=COLORS["val"], ms=6)
+
+            # test
+            if self.has_test and met_te is not None:
+                lab_te, j_te, v_te = _legend_label("test", met_te[key])
+                ax.plot(thr_seq, met_te[key], color=COLORS["test"], lw=2, label=lab_te)
+                if j_te is not None and np.isfinite(v_te):
+                    ax.plot(thr_seq[j_te], v_te, "o", color=COLORS["test"], ms=6)
+
+            ax.set_ylabel(label)
+            ax.set_xlim(0.0, 1.0)
+            ax.set_ylim(*items_dict[label])
+            ax.grid(alpha=0.25)
+            ax.legend(loc="lower right", fontsize=8, frameon=True)
+
+        for ax, (lbl, key, ylim) in zip(axes, items):
+            _plot_one(ax, lbl, key)
+
+        axes[-2].set_xlabel("Probability threshold")
+        axes[-1].set_xlabel("Probability threshold")
+
+        title = (
+            "Threshold Sweep — ROC-AUC (train/val/test): "
+            f"{_fmt(auc_tr)} / {_fmt(auc_va)} / {_fmt(auc_te)}   |   "
+            "PR-AUC: "
+            f"{_fmt(ap_tr)} / {_fmt(ap_va)} / {_fmt(ap_te)}"
+        )
+        fig.suptitle(title, y=0.985, fontsize=12)
+
+        fig.tight_layout(rect=[0, 0, 1, 0.96])
+        fig.savefig(self.run_dir / "03_threshold_sweep.png", dpi=150)
+        plt.close(fig)
+
+        if verbose:
+
+            def _best_report(name, met):
+                if met is None:
+                    return
+                for metric_key, pretty in [
+                    ("acc", "Accuracy"),
+                    ("prec", "Precision"),
+                    ("rec", "Recall"),
+                    ("f1", "F1"),
+                    ("spec", "Specificity"),
+                    ("youden", "Youden"),
+                ]:
+                    arr = met[metric_key]
+                    if arr is None or not np.isfinite(arr).any():
+                        print(f"  [{name}] {pretty:<11s}: t*=/  val=/")
+                        continue
+                    j = _best_idx(arr)
+                    print(
+                        f"  [{name}] {pretty:<11s}: t*={_fmt(thr_seq[j])}  val={_fmt(arr[j])}"
+                    )
+
+            print("[threshold_sweep] Best thresholds:")
+            _best_report("train", met_tr)
+            if self.has_val:
+                _best_report("val", met_va)
+            if self.has_test:
+                _best_report("test", met_te)
