@@ -1402,14 +1402,16 @@ class GPClassificationRunner:
         ax1.set_ylabel("Neg-ELBO")
         ax1.set_xlim(0, max(steps) if steps else self.maxiter)
         # -------------------------------------------------------
-        ax2 = ax1.twinx()
+        ax2 = (
+            ax1.twinx()
+        )  # generate parallel y-axis on the right side for the accuracy range
         acc_train = [l.acc_train for l in self.run_log.logs]
         ax2.plot(
             steps,
-            acc_train,
+            acc_train,  # train
             linestyle="--",
             linewidth=2,
-            color="blue",
+            color="royalblue",
             label="train",
         )
 
@@ -1417,10 +1419,10 @@ class GPClassificationRunner:
             acc_val = [l.acc_val for l in self.run_log.logs]
             ax2.plot(
                 steps,
-                acc_val,
+                acc_val,  # val
                 linestyle="--",
                 linewidth=2,
-                color="darkgreen",
+                color="lime",
                 label="val",
             )
 
@@ -1428,10 +1430,10 @@ class GPClassificationRunner:
             acc_test = [l.acc_test for l in self.run_log.logs]
             ax2.plot(
                 steps,
-                acc_test,
+                acc_test,  # test
                 linestyle="--",
                 linewidth=2,
-                color="red",
+                color="orange",
                 label="test",
             )
 
@@ -1451,11 +1453,15 @@ class GPClassificationRunner:
 
         # Define some helper methods
         def _fmt(x) -> str:
+            """
+            Helper for printing format
+            """
             return f"{x:.3f}" if (x is not None and np.isfinite(x)) else "/"
 
         def _get_split(name: str) -> Tuple:
             """
-            Return (y, p) for split; None if split missing
+            Create tuple of (y, p) for a given split (train, val, test)
+            Both are set to None if val or test sets are missing
             """
             if name == "train":
                 y = self.Y_train.ravel().astype(int)
@@ -1465,7 +1471,7 @@ class GPClassificationRunner:
                     return None, None
                 y = self.Y_val.ravel().astype(int)
                 p = np.array(self.run_log.p_val_best)
-            else:  # "test"
+            else:  # last case is "test"
                 if not getattr(self, "has_test", False):
                     return None, None
                 y = self.Y_test.ravel().astype(int)
@@ -1474,7 +1480,8 @@ class GPClassificationRunner:
 
         def _aucs(y: np.ndarray, p: np.ndarray) -> Tuple:
             """
-            Return (ROC-AUC, PR-AUC) or (None, None) if not computable
+            Create tuple of (ROC-AUC, PR-AUC) for a given pair of labels and predicted probabilities (y,p)
+            Both are set to None if they can't be computed
             """
             if y is None or p is None or len(p) == 0:
                 return None, None
@@ -1490,14 +1497,15 @@ class GPClassificationRunner:
                 pass
             return roc, ap
 
-        # Generate threshold grid, with 51 points delta threshold is 0.02
-        thr_seq = np.linspace(0.0, 1.0, 51)
-
-        def _metrics_at_all_thresholds(y: np.ndarray, p: np.ndarray) -> Dict:
+        def _metrics_at_all_thresholds(
+            y: np.ndarray, p: np.ndarray, thr_seq: np.array
+        ) -> Dict:
             """
-            Compute arrays for all thresholds; NaNs if split missing
+            Compute a predefined set of metrics given the true labels and the predicted probabilities (y,p)
+            Scan the decision boundary (looking at different probability values) to identify best threshold
             """
             if y is None or p is None or len(p) == 0:
+                # Set everything to NaN since the metrics can't be computed
                 nan = np.full_like(thr_seq, np.nan, dtype=float)
                 return {
                     "acc": nan,
@@ -1507,26 +1515,48 @@ class GPClassificationRunner:
                     "spec": nan,
                     "youden": nan,
                 }
+
+            # Define output dict
             out = {"acc": [], "prec": [], "rec": [], "f1": [], "spec": [], "youden": []}
             y = y.astype(int)
+
+            # Scan different threshold values
             for th in thr_seq:
                 yhat = (p >= th).astype(int)
-                TP = np.sum((yhat == 1) & (y == 1))
-                FP = np.sum((yhat == 1) & (y == 0))
-                TN = np.sum((yhat == 0) & (y == 0))
-                FN = np.sum((yhat == 0) & (y == 1))
+                TP = np.sum(
+                    (yhat == 1) & (y == 1)
+                )  # true positive  (y = 1, p > threshold)
+                FP = np.sum(
+                    (yhat == 1) & (y == 0)
+                )  # false positive (y = 0, p > threshold)
+                TN = np.sum(
+                    (yhat == 0) & (y == 0)
+                )  # true negative  (y = 0, p < threshold)
+                FN = np.sum(
+                    (yhat == 0) & (y == 1)
+                )  # false negative (y = 1, p < threshold)
                 N = len(y)
 
+                # Accuracy: ratio of correct predictions among the total cases
                 acc = (TP + TN) / N if N else np.nan
+                # Precision: number of true positive divided by number of samples predicted as positive (punished by high FP)
                 precision = TP / (TP + FP) if (TP + FP) > 0 else np.nan
+                # Recall: number of true positive divided by number of samples that should have been identified as positive (punished by high FN)
                 recall = TP / (TP + FN) if (TP + FN) > 0 else 0.0  # TPR
+                # F1: harmonic mean of precision and recall
                 f1 = (
                     (2 * precision * recall / (precision + recall))
                     if (not np.isnan(precision) and (precision + recall) > 0)
                     else np.nan
                 )
+                # Sensitivity (recall): how good your ability to detect positive cases is (given all predicted y=1)
+                # Specificity: how good your ability to detect negative cases is (given all true y=0)
                 specificity = TN / (TN + FP) if (TN + FP) > 0 else np.nan
+                # False positive rate: rate of predicted as positive but y=0 out of all the y=0
                 fpr = FP / (FP + TN) if (FP + TN) > 0 else 0.0
+                # Youden's J: sensitivity + specificity - 1
+                #           = sensitivity - (1 - specificity)
+                #           = recall      - fpr
                 youden = recall - fpr  # TPR - FPR
 
                 out["acc"].append(acc)
@@ -1548,6 +1578,9 @@ class GPClassificationRunner:
             scores = np.where(np.isnan(arr), -np.inf, arr)
             idxs = np.where(scores == np.max(scores))[0]
             return int(idxs[0]) if idxs.size else 0
+
+        # Generate threshold grid, with 51 points delta threshold is 0.02
+        thr_seq = np.linspace(0.0, 1.0, 51)
 
         y_tr, p_tr = _get_split("train")
         y_va, p_va = _get_split("val")
@@ -1586,7 +1619,7 @@ class GPClassificationRunner:
             v_star = vals[j]
             return f"{split_name}: t*={_fmt(t_star)}  val={_fmt(v_star)}", j, v_star
 
-        def _plot_one(ax, label, key):
+        def _plot_curve(ax, label, key):
             # train
             lab_tr, j_tr, v_tr = _legend_label("train", met_tr[key])
             ax.plot(thr_seq, met_tr[key], color=COLORS["train"], lw=2, label=lab_tr)
@@ -1614,8 +1647,9 @@ class GPClassificationRunner:
             ax.legend(loc="lower right", fontsize=8, frameon=True)
 
         for ax, (lbl, key, ylim) in zip(axes, items):
-            _plot_one(ax, lbl, key)
+            _plot_curve(ax, lbl, key)
 
+        # Only show x-label for the bottom panels
         axes[-2].set_xlabel("Probability threshold")
         axes[-1].set_xlabel("Probability threshold")
 
@@ -1626,13 +1660,12 @@ class GPClassificationRunner:
             f"{_fmt(ap_tr)} / {_fmt(ap_va)} / {_fmt(ap_te)}"
         )
         fig.suptitle(title, y=0.985, fontsize=12)
-
         fig.tight_layout(rect=[0, 0, 1, 0.96])
         fig.savefig(self.run_dir / "03_threshold_sweep.png", dpi=150)
         plt.close(fig)
 
         if verbose:
-
+            # Print some info on the terminal
             def _best_report(name, met):
                 if met is None:
                     return
