@@ -360,8 +360,11 @@ class GPClassificationRunner:
         """
         Generate visual outputs as summary of the training process (PNGs + GIFs)
         """
+        self.colors = {"train": "dodgerblue", "val": "forestgreen", "test": "orangered"}
+
         self._plot_learning_curves()
         self._threshold_sweep()
+        self._plot_calibration_curve()
 
     # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
     # ~~~~~~~~~~~~~~~ Low level methods ~~~~~~~~~~~~~~~
@@ -754,7 +757,7 @@ class GPClassificationRunner:
             "tolerance": 1e-4,
             "best": 1e4,
             "ema": None,  # evaluation of exponential moving average (EMA)
-            "ema_beta": 0.9,  # decay factor for EMA
+            "ema_beta": 0.8,  # decay factor for EMA, lower values -> faster decay
             "warmup_steps": max(int(0.02 * self.maxiter), 10),  # ~2% warmup steps
         }
 
@@ -1391,13 +1394,18 @@ class GPClassificationRunner:
     # ----------------- Visual Summary ----------------- #
     def _plot_learning_curves(self) -> None:
         """
-        Plot curves used in training process
+        Plot curves used in training process (e.g. NLML, neg-ELBO, ...)
+
+        Note: As the training process evolves, NLML should decrease over iterations while other metrics such as accuracy should push toward 1
+              Jumps in the metric are allowed due to approximation methods and additional considerations, this being said, it shouldn't be too crazy
         """
         fig, ax1 = plt.subplots(figsize=(8, 4.5))
         # -------------------------------------------------------
         steps = [l.step for l in self.run_log.logs]
         nlml = [l.nlml for l in self.run_log.logs]
+        ema = [l.ema for l in self.run_log.logs]
         ax1.plot(steps, nlml, linewidth=2, color="black", label="NLML")
+        ax1.plot(steps, ema, linewidth=1.5, color="grey", alpha=0.5, label="EMA")
         ax1.set_xlabel("Iteration")
         ax1.set_ylabel("Neg-ELBO")
         ax1.set_xlim(0, max(steps) if steps else self.maxiter)
@@ -1409,9 +1417,9 @@ class GPClassificationRunner:
         ax2.plot(
             steps,
             acc_train,  # train
-            linestyle="--",
-            linewidth=2,
-            color="royalblue",
+            linestyle="-",
+            linewidth=1.2,
+            color=self.colors["train"],
             label="train",
         )
 
@@ -1420,9 +1428,9 @@ class GPClassificationRunner:
             ax2.plot(
                 steps,
                 acc_val,  # val
-                linestyle="--",
-                linewidth=2,
-                color="lime",
+                linestyle="-",
+                linewidth=1.2,
+                color=self.colors["val"],
                 label="val",
             )
 
@@ -1431,9 +1439,9 @@ class GPClassificationRunner:
             ax2.plot(
                 steps,
                 acc_test,  # test
-                linestyle="--",
-                linewidth=2,
-                color="orange",
+                linestyle="-",
+                linewidth=1.2,
+                color=self.colors["test"],
                 label="test",
             )
 
@@ -1449,6 +1457,8 @@ class GPClassificationRunner:
         """
         Plot threshold sweeps for Accuracy, Precision, Recall, F1, Specificity, Youden's J for train
         and for val/test if available Uses probabilities from the best iteration
+
+        Note: In a binary classification problem with balanced labels the prediction probability threshold should be found around 0.5
         """
 
         # Define some helper methods
@@ -1523,18 +1533,14 @@ class GPClassificationRunner:
             # Scan different threshold values
             for th in thr_seq:
                 yhat = (p >= th).astype(int)
-                TP = np.sum(
-                    (yhat == 1) & (y == 1)
-                )  # true positive  (y = 1, p > threshold)
-                FP = np.sum(
-                    (yhat == 1) & (y == 0)
-                )  # false positive (y = 0, p > threshold)
-                TN = np.sum(
-                    (yhat == 0) & (y == 0)
-                )  # true negative  (y = 0, p < threshold)
-                FN = np.sum(
-                    (yhat == 0) & (y == 1)
-                )  # false negative (y = 1, p < threshold)
+                # true positive  (y = 1, p > threshold)
+                TP = np.sum((yhat == 1) & (y == 1))
+                # false positive (y = 0, p > threshold)
+                FP = np.sum((yhat == 1) & (y == 0))
+                # true negative  (y = 0, p < threshold)
+                TN = np.sum((yhat == 0) & (y == 0))
+                # false negative (y = 1, p < threshold)
+                FN = np.sum((yhat == 0) & (y == 1))
                 N = len(y)
 
                 # Accuracy: ratio of correct predictions among the total cases
@@ -1590,9 +1596,9 @@ class GPClassificationRunner:
         auc_va, ap_va = _aucs(y_va, p_va)
         auc_te, ap_te = _aucs(y_te, p_te)
 
-        met_tr = _metrics_at_all_thresholds(y_tr, p_tr)
-        met_va = _metrics_at_all_thresholds(y_va, p_va) if self.has_val else None
-        met_te = _metrics_at_all_thresholds(y_te, p_te) if self.has_test else None
+        met_tr = _metrics_at_all_thresholds(y_tr, p_tr, thr_seq)
+        met_va = _metrics_at_all_thresholds(y_va, p_va, thr_seq)
+        met_te = _metrics_at_all_thresholds(y_te, p_te, thr_seq)
 
         # Plot
         fig, axes = plt.subplots(3, 2, figsize=(10.5, 9.0), sharex=True)
@@ -1606,7 +1612,6 @@ class GPClassificationRunner:
             ("Youden's J", "youden", (-1.0, 1.0)),
         ]
         items_dict = {lbl: ylim for (lbl, _, ylim) in items}
-        COLORS = {"train": "blue", "val": "green", "test": "orange"}
 
         def _legend_label(split_name: str, vals: np.ndarray):
             """
@@ -1622,23 +1627,27 @@ class GPClassificationRunner:
         def _plot_curve(ax, label, key):
             # train
             lab_tr, j_tr, v_tr = _legend_label("train", met_tr[key])
-            ax.plot(thr_seq, met_tr[key], color=COLORS["train"], lw=2, label=lab_tr)
+            ax.plot(
+                thr_seq, met_tr[key], color=self.colors["train"], lw=2, label=lab_tr
+            )
             if j_tr is not None and np.isfinite(v_tr):
-                ax.plot(thr_seq[j_tr], v_tr, "o", color=COLORS["train"], ms=6)
+                ax.plot(thr_seq[j_tr], v_tr, "^", color=self.colors["train"], ms=6)
 
-            # val
-            if self.has_val and met_va is not None:
+            if self.has_val:
                 lab_va, j_va, v_va = _legend_label("val", met_va[key])
-                ax.plot(thr_seq, met_va[key], color=COLORS["val"], lw=2, label=lab_va)
+                ax.plot(
+                    thr_seq, met_va[key], color=self.colors["val"], lw=2, label=lab_va
+                )
                 if j_va is not None and np.isfinite(v_va):
-                    ax.plot(thr_seq[j_va], v_va, "o", color=COLORS["val"], ms=6)
+                    ax.plot(thr_seq[j_va], v_va, "^", color=self.colors["val"], ms=6)
 
-            # test
-            if self.has_test and met_te is not None:
+            if self.has_test:
                 lab_te, j_te, v_te = _legend_label("test", met_te[key])
-                ax.plot(thr_seq, met_te[key], color=COLORS["test"], lw=2, label=lab_te)
+                ax.plot(
+                    thr_seq, met_te[key], color=self.colors["test"], lw=2, label=lab_te
+                )
                 if j_te is not None and np.isfinite(v_te):
-                    ax.plot(thr_seq[j_te], v_te, "o", color=COLORS["test"], ms=6)
+                    ax.plot(thr_seq[j_te], v_te, "^", color=self.colors["test"], ms=6)
 
             ax.set_ylabel(label)
             ax.set_xlim(0.0, 1.0)
@@ -1661,7 +1670,7 @@ class GPClassificationRunner:
         )
         fig.suptitle(title, y=0.985, fontsize=12)
         fig.tight_layout(rect=[0, 0, 1, 0.96])
-        fig.savefig(self.run_dir / "03_threshold_sweep.png", dpi=150)
+        fig.savefig(self.run_dir / "02_threshold_sweep.png", dpi=150)
         plt.close(fig)
 
         if verbose:
@@ -1692,3 +1701,158 @@ class GPClassificationRunner:
                 _best_report("val", met_va)
             if self.has_test:
                 _best_report("test", met_te)
+
+    def _plot_calibration_curve(self, n_bins: int = 10) -> None:
+        """
+        Generate and plot calibration curves with initial equal-width bins in [0, 1]
+        Any bin with fewer than 3 points is adaptively merged into the adjacent bin that has
+        fewer points (ties merge left)
+
+        Note: A well calibrated classification model predicts p times the data in a bin of probabilty p
+              e.g. all data in the first p bin should have P(y=1) -> 0, similarly all data data in the last p bin should have P(y=1) -> 1
+                   additionally, all data in the p bin at 0.2 should have P(y=1) -> 0.2
+        """
+        MIN_POINTS_PER_BIN = 3  # minimum samples per bin (otherwise looks for merging)
+
+        def _get_split(name: str) -> Tuple:
+            """
+            Create tuple of (y, p) for a given split (train, val, test)
+            Both are set to None if val or test sets are missing
+            """
+            if name == "train":
+                y = self.Y_train.ravel().astype(int)
+                p = np.array(self.run_log.p_train_best)
+            elif name == "val":
+                if not getattr(self, "has_val", False):
+                    return None, None
+                y = self.Y_val.ravel().astype(int)
+                p = np.array(self.run_log.p_val_best)
+            else:  # last case is "test"
+                if not getattr(self, "has_test", False):
+                    return None, None
+                y = self.Y_test.ravel().astype(int)
+                p = np.array(self.run_log.p_test_best)
+            return y, p
+
+        def _calibration_points(
+            y: np.ndarray, p: np.ndarray, initial_bins: int
+        ) -> Tuple:
+            """
+            Compute (mean_pred, frac_pos) after adaptively merging sparse bins to ajdacent bins
+            """
+            if p.size < MIN_POINTS_PER_BIN:
+                return None
+
+            # Equal-width initial bins as starting configuration
+            initial_bins = int(initial_bins)
+            edges = np.linspace(0.0, 1.0, initial_bins + 1)
+
+            # Assign each point to a bin index in [0, initial_bins-1]
+            # Since we provide edges in increasing order and `right==False` -> edges[i-1] <= x < edges[i]
+            idx = np.digitize(p, edges, right=False) - 1
+            idx[idx == initial_bins] = initial_bins - 1
+
+            # Distribute p among the bins to see bin population
+            bin_indices = [np.where(idx == b)[0].tolist() for b in range(initial_bins)]
+
+            # Process the bins such that each one of them has enough samples, otherwise merge
+            # Merge into the neighbor (left/right) with fewer points; with ties always choose left bin
+            while True:
+                counts = [len(ix) for ix in bin_indices]
+                # condition for a single bin left or ideal scenario with all bins filled
+                if len(bin_indices) <= 1 or all(
+                    c >= MIN_POINTS_PER_BIN for c in counts
+                ):
+                    break
+                # first underfilled bin
+                b = next(i for i, c in enumerate(counts) if c < MIN_POINTS_PER_BIN)
+                left = b - 1 if b - 1 >= 0 else None
+                right = b + 1 if b + 1 < len(bin_indices) else None
+                if left is None and right is None:
+                    break  # single bin case
+                if left is None:
+                    bin_indices[right].extend(
+                        bin_indices[b]
+                    )  # merge current into right
+                    del bin_indices[b]  # get rid of old bin
+                elif right is None:
+                    bin_indices[left].extend(bin_indices[b])  # merge current into left
+                    del bin_indices[b]  # get rid of old bin
+                else:
+                    # choose neighbor with fewer points; with ties always choose left bin
+                    if counts[left] <= counts[right]:
+                        bin_indices[left].extend(bin_indices[b])
+                        del bin_indices[b]
+                    else:
+                        # merge right into current b (keeps order stable)
+                        bin_indices[b].extend(bin_indices[right])
+                        del bin_indices[right]
+
+            # Compute mean predicted probabilities (x values) and empirical fraction (y values)
+            mean_pred, frac_pos = [], []
+            for ix in bin_indices:
+                if not ix:  # safety
+                    continue
+                ix = np.asarray(ix, dtype=int)
+                mean_pred.append(float(p[ix].mean()))
+                frac_pos.append(float((y[ix] == 1).mean()))
+
+            if not mean_pred:
+                return None
+            return np.array(mean_pred), np.array(frac_pos)
+
+        # Collect available splits
+        splits = [
+            ("train", True),
+            ("val", getattr(self, "has_val", False)),
+            ("test", getattr(self, "has_test", False)),
+        ]
+        curves = []  # (name, mean_pred, frac_pos, brier)
+
+        for name, available in splits:
+            if not available and name != "train":
+                continue
+            y, p = _get_split(name)
+            if y is None or p is None:
+                print(f"Skipping {name}: no usable labels/probabilities")
+                continue
+
+            pts = _calibration_points(y, p, n_bins)
+            if pts is None:
+                print(
+                    f"Skipping {name}: insufficient points after binning (n={p.size})"
+                )
+                continue
+            mean_pred, frac_pos = pts
+            brier = brier_score_loss(y, p)
+            curves.append((name, mean_pred, frac_pos, brier))
+
+        if not curves:
+            print("No eligible splits for calibration curve")
+            return
+
+        # Plot all available curves
+        fig, ax = plt.subplots(figsize=(5.6, 5.6))
+        ax.plot(
+            [0, 1], [0, 1], linestyle=":", linewidth=2, label="Perfectly calibrated"
+        )
+
+        markers = {"train": "o", "val": "s", "test": "^"}
+        for name, mean_pred, frac_pos, brier in curves:
+            ax.plot(
+                mean_pred,
+                frac_pos,
+                marker=markers.get(name, "o"),
+                linewidth=1.5,
+                color=self.colors[name],
+                label=f"{name.capitalize()} (Brier={brier:.3f})",
+            )
+
+        ax.set_xlabel("Predicted probability")
+        ax.set_ylabel("Empirical probability")
+        ax.set_title("Calibration curves")
+        # ax.grid(alpha=0.3)
+        ax.legend(loc="best")
+        fig.tight_layout()
+        fig.savefig(self.run_dir / "03_calibration_curve.png", dpi=150)
+        plt.close(fig)
