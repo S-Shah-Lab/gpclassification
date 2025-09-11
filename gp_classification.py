@@ -1585,6 +1585,24 @@ class GPClassificationRunner:
             idxs = np.where(scores == np.max(scores))[0]
             return int(idxs[0]) if idxs.size else 0
 
+        def _roc_points(y, p):
+            if y is None or p is None or len(p) == 0:
+                return None, None
+            try:
+                fpr, tpr, _ = roc_curve(y, p)
+                return fpr, tpr
+            except Exception:
+                return None, None
+
+        def _pr_points(y, p):
+            if y is None or p is None or len(p) == 0:
+                return None, None
+            try:
+                prec, rec, _ = precision_recall_curve(y, p)
+                return prec, rec
+            except Exception:
+                return None, None
+
         # Generate threshold grid, with 51 points delta threshold is 0.02
         thr_seq = np.linspace(0.0, 1.0, 51)
 
@@ -1600,9 +1618,88 @@ class GPClassificationRunner:
         met_va = _metrics_at_all_thresholds(y_va, p_va, thr_seq)
         met_te = _metrics_at_all_thresholds(y_te, p_te, thr_seq)
 
+        fpr_tr, tpr_tr = _roc_points(y_tr, p_tr)
+        fpr_va, tpr_va = _roc_points(y_va, p_va)
+        fpr_te, tpr_te = _roc_points(y_te, p_te)
+
+        prec_tr, rec_tr = _pr_points(y_tr, p_tr)
+        prec_va, rec_va = _pr_points(y_va, p_va)
+        prec_te, rec_te = _pr_points(y_te, p_te)
+
         # Plot
-        fig, axes = plt.subplots(3, 2, figsize=(10.5, 9.0), sharex=True)
+        fig, axes = plt.subplots(4, 2, figsize=(10.5, 12.0), sharex=True)
         axes = axes.ravel()
+
+        # ROC
+        ax_roc = axes[0]
+        ax_roc.plot([0, 1], [0, 1], ls="--", color="0.7", lw=1)  # diagonal
+        if fpr_tr is not None:
+            ax_roc.plot(
+                fpr_tr,
+                tpr_tr,
+                color=self.colors["train"],
+                lw=2,
+                label=f"train AUC = {_fmt(auc_tr)}",
+            )
+        if getattr(self, "has_val", False) and fpr_va is not None:
+            ax_roc.plot(
+                fpr_va,
+                tpr_va,
+                color=self.colors["val"],
+                lw=2,
+                label=f"val AUC = {_fmt(auc_va)}",
+            )
+        if getattr(self, "has_test", False) and fpr_te is not None:
+            ax_roc.plot(
+                fpr_te,
+                tpr_te,
+                color=self.colors["test"],
+                lw=2,
+                label=f"test AUC = {_fmt(auc_te)}",
+            )
+        # ax_roc.set_title("ROC curve")
+        ax_roc.set_xlim(0, 1)
+        ax_roc.set_ylim(0, 1)
+        ax_roc.set_xlabel("FPR")
+        ax_roc.set_ylabel("TPR")
+        ax_roc.grid(alpha=0.25)
+        ax_roc.legend(loc="lower right", fontsize=8, frameon=True)
+
+        # PR
+        ax_pr = axes[1]
+        if prec_tr is not None:
+            ax_pr.plot(
+                rec_tr,
+                prec_tr,
+                color=self.colors["train"],
+                lw=2,
+                label=f"train AP = {_fmt(ap_tr)}",
+            )
+        if getattr(self, "has_val", False) and prec_va is not None:
+            ax_pr.plot(
+                rec_va,
+                prec_va,
+                color=self.colors["val"],
+                lw=2,
+                label=f"val AP = {_fmt(ap_va)}",
+            )
+        if getattr(self, "has_test", False) and prec_te is not None:
+            ax_pr.plot(
+                rec_te,
+                prec_te,
+                color=self.colors["test"],
+                lw=2,
+                label=f"test AP = {_fmt(ap_te)}",
+            )
+        # ax_pr.set_title("Precision-Recall curve")
+        ax_pr.set_xlim(0, 1)
+        ax_pr.set_ylim(0, 1)
+        ax_pr.set_xlabel("Recall")
+        ax_pr.set_ylabel("Precision")
+        ax_pr.grid(alpha=0.25)
+        ax_pr.legend(loc="lower left", fontsize=8, frameon=True)
+
+        # Additional metric sweep
         items = [
             ("Accuracy", "acc", (0.0, 1.0)),
             ("Precision", "prec", (0.0, 1.0)),
@@ -1655,7 +1752,8 @@ class GPClassificationRunner:
             ax.grid(alpha=0.25)
             ax.legend(loc="lower right", fontsize=8, frameon=True)
 
-        for ax, (lbl, key, ylim) in zip(axes, items):
+        # start plotting the six curves from axes[2] onward to keep the new top row intact
+        for ax, (lbl, key, ylim) in zip(axes[2:], items):
             _plot_curve(ax, lbl, key)
 
         # Only show x-label for the bottom panels
@@ -1663,7 +1761,7 @@ class GPClassificationRunner:
         axes[-1].set_xlabel("Probability threshold")
 
         title = (
-            "Threshold Sweep — ROC-AUC (train/val/test): "
+            "Threshold Sweep - ROC-AUC (train / val / test): "
             f"{_fmt(auc_tr)} / {_fmt(auc_va)} / {_fmt(auc_te)}   |   "
             "PR-AUC: "
             f"{_fmt(ap_tr)} / {_fmt(ap_va)} / {_fmt(ap_te)}"
