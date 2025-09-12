@@ -363,8 +363,13 @@ class GPClassificationRunner:
         self.colors = {"train": "dodgerblue", "val": "forestgreen", "test": "orangered"}
 
         self._plot_learning_curves()
-        self._threshold_sweep()
-        self._plot_calibration_curve()
+        self._plot_threshold_sweep()
+        self._plot_calibration_curves()
+        self._plot_kernel_scaling()
+        self._plot_kernel_W()
+        self._plot_kernel_eigs()
+
+        # TODO: plot kernel related stuff, use multiple methods for eta + ard, W over iter, kernel eigen
 
     # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
     # ~~~~~~~~~~~~~~~ Low level methods ~~~~~~~~~~~~~~~
@@ -854,6 +859,10 @@ class GPClassificationRunner:
         - If `use_validation_for_adaptation` and a validation set exist, use `nlpd_val`
         - Otherwise fall back to `nlml` (training objective)
         """
+
+        # TODO: modify the inspection of the learning rate to make sure cooldown is not affected by the metric (e.g. NLML) increasing
+        # that is an easy but wrong way to force a learning rate adaptation since the metric doesn't improve from `best`
+
         # Grab current state of structure for learning rate adaptation
         st = self._lr_state
         st["step"] = self.step
@@ -1090,7 +1099,7 @@ class GPClassificationRunner:
 
         return metrics
 
-    def _snapshot_kernel_params(self) -> Dict[str, Optional[Any]]:
+    def _snapshot_kernel(self) -> Dict[str, Optional[Any]]:
         """
         Grab kernel parameters
         """
@@ -1134,11 +1143,11 @@ class GPClassificationRunner:
             except Exception:
                 ard = None
 
-            # Optional eigenvalues of Gram on a small subset (cheap-ish)
+            # Optional eigenvalues of Gram on a small subset
             try:
                 Xg = self.X_train if self.X_train is not None else None
                 if Xg is not None:
-                    # Use a small subset to keep it light
+                    # Use reduce dim to keep it light
                     m = min(64, Xg.shape[0])
                     K = self.kernel.K(
                         tf.convert_to_tensor(Xg[:m], dtype=tf.float64)
@@ -1193,7 +1202,7 @@ class GPClassificationRunner:
         m_test = self._compute_metrics(self.Y_test, p_test)
 
         # Snapshot kernel params (dict)
-        kernel_snapshot = self._snapshot_kernel_params()
+        kernel_snapshot = self._snapshot_kernel()
 
         # Current training NLML
         nlml_ = float(self.loss_fn(self.model).numpy())
@@ -1394,11 +1403,14 @@ class GPClassificationRunner:
     # ----------------- Visual Summary ----------------- #
     def _plot_learning_curves(self) -> None:
         """
-        Plot curves used in training process (e.g. NLML, neg-ELBO, ...)
+        Plot curves used in training process (e.g. neg-elbo as nlml, nlpd_val, ...)
 
         Note: As the training process evolves, NLML should decrease over iterations while other metrics such as accuracy should push toward 1
               Jumps in the metric are allowed due to approximation methods and additional considerations, this being said, it shouldn't be too crazy
         """
+        # TODO: currently only plotting NLML as metric but it also need to plot nlpd_val
+        # which curve can be grabbed from self._best_metric_name
+
         fig, ax1 = plt.subplots(figsize=(8, 4.5))
         # -------------------------------------------------------
         steps = [l.step for l in self.run_log.logs]
@@ -1453,7 +1465,7 @@ class GPClassificationRunner:
         fig.savefig(self.run_dir / "01_learning_curves.png", dpi=150)
         plt.close(fig)
 
-    def _threshold_sweep(self, verbose: bool = False) -> None:
+    def _plot_threshold_sweep(self, verbose: bool = False) -> None:
         """
         Plot threshold sweeps for Accuracy, Precision, Recall, F1, Specificity, Youden's J for train
         and for val/test if available Uses probabilities from the best iteration
@@ -1800,9 +1812,9 @@ class GPClassificationRunner:
             if self.has_test:
                 _best_report("test", met_te)
 
-    def _plot_calibration_curve(self, n_bins: int = 10) -> None:
+    def _generate_calibration_curves(self, n_bins: int = 10) -> List:
         """
-        Generate and plot calibration curves with initial equal-width bins in [0, 1]
+        Generate calibration curves with initial equal-width bins in [0, 1]
         Any bin with fewer than 3 points is adaptively merged into the adjacent bin that has
         fewer points (ties merge left)
 
@@ -1927,30 +1939,107 @@ class GPClassificationRunner:
 
         if not curves:
             print("No eligible splits for calibration curve")
-            return
+            return None
 
-        # Plot all available curves
-        fig, ax = plt.subplots(figsize=(5.6, 5.6))
-        ax.plot(
-            [0, 1], [0, 1], linestyle=":", linewidth=2, label="Perfectly calibrated"
-        )
+    def _plot_calibration_curves(self, curves: List) -> None:
+        """
+        Plot calibration curves generated by the method `_generate_calibration_curves`
+        Train, val and test are plot accordingly when available
+        """
 
-        markers = {"train": "o", "val": "s", "test": "^"}
-        for name, mean_pred, frac_pos, brier in curves:
+        curves = self._generate_calibration_curves()
+
+        if curves is not None:
+            fig, ax = plt.subplots(figsize=(5.6, 5.6))
             ax.plot(
-                mean_pred,
-                frac_pos,
-                marker=markers.get(name, "o"),
-                linewidth=1.5,
-                color=self.colors[name],
-                label=f"{name.capitalize()} (Brier={brier:.3f})",
+                [0, 1], [0, 1], linestyle=":", linewidth=2, label="Perfectly calibrated"
             )
 
-        ax.set_xlabel("Predicted probability")
-        ax.set_ylabel("Empirical probability")
-        ax.set_title("Calibration curves")
-        # ax.grid(alpha=0.3)
-        ax.legend(loc="best")
+            markers = {"train": "o", "val": "s", "test": "^"}
+            for name, mean_pred, frac_pos, brier in curves:
+                ax.plot(
+                    mean_pred,
+                    frac_pos,
+                    marker=markers.get(name, "o"),
+                    linewidth=1.5,
+                    color=self.colors[name],
+                    label=f"{name.capitalize()} (Brier={brier:.3f})",
+                )
+
+            ax.set_xlabel("Predicted probability")
+            ax.set_ylabel("Empirical probability")
+            ax.set_title("Calibration curves")
+            # ax.grid(alpha=0.3)
+            ax.legend(loc="best")
+            fig.tight_layout()
+            fig.savefig(self.run_dir / "03_calibration_curve.png", dpi=150)
+            plt.close(fig)
+
+    def _plot_kernel_scaling(self) -> None:
+        """
+        Plot kernel scaling hyperparameters: self.eta (float per iteration)
+                                             self.ard (float per spatial filter per iteration)
+        At least one between self.eta_flag and self.ard_flag need to be True
+        """
+        if self.eta_flag or self.ard_flag:
+            # At least one of them is a trainable parameter
+            fig, ax = plt.subplots(figsize=(8, 4.5))
+            # -------------------------------------------------------
+            steps = [l.step for l in self.run_log.logs]
+
+            if self.eta_flag:
+                etas = [
+                    l.eta if l.eta is not None else np.nan for l in self.run_log.logs
+                ]  # List[ float ]
+                ax.plot(steps, etas, linewidth=2, color="black", label=r"$\eta")
+
+            if self.ard_flag:
+                for k in range(self.nf):
+                    vals_k = [
+                        (l.ard[k] if (l.ard is not None and len(l.ard) > k) else np.nan)
+                        for l in self.run_log.logs
+                    ]  # List [ float ]
+                    ax.plot(steps, vals_k, linewidth=2, label=f"ARD[{k}]")
+
+            ax.set_xlabel("Iteration")
+            ax.set_ylabel("Hyperparameter")
+            ax.set_xlim(0, self.maxiter)
+            if ax.get_legend_handles_labels()[0]:
+                ax.legend(ncol=2, fontsize=8)
+            fig.tight_layout()
+            fig.savefig(self.run_dir / "04_kernel_parameters.png", dpi=150)
+            plt.close(fig)
+
+    def _plot_kernel_W(self) -> None:
+        """
+        Plot kernel spatial filter weights and their evolution over the iterations, one plot per spatial filter
+        self.nf provides the number of spatial filters that have been created
+        self.run_log.logs[0].W is a list with sub-lists:
+            the list has len() = self.s, one entry per channel
+            the sub-lists have len() = self.nf, one entry per spatial filter
+        """
+
+        fig, ax = plt.subplots(1, self.nf, figsize=(int(5 * self.nf), 4))
+        # -------------------------------------------------------
+        steps = [l.step for l in self.run_log.logs]  # shape (self.maxiter, )
+        Ws = np.array(
+            [l.W for l in self.run_log.logs]
+        )  # shape (self.maxiter, self.s, self.nf)
+
+        for k in range(self.nf):
+            ax[k].plot(
+                steps, Ws[:, :, k], linewidth=1.2
+            )  # self.s plots in the same panel
+            ax[k].set_xlabel("Iteration")
+            ax[k].set_ylabel(f"W[:,{k}]")
+            ax[k].set_xlim(0, self.maxiter)
         fig.tight_layout()
-        fig.savefig(self.run_dir / "03_calibration_curve.png", dpi=150)
+        fig.savefig(self.run_dir / "05_kernel_W.png", dpi=150)
         plt.close(fig)
+
+    def _plot_kernel_eigs(self) -> None:
+        """
+        Plot kernel eigenvalues at the `best` iteration
+        self.run_log.logs[self._best_iter - 1] contains the eigenvalues at the `best` iteration
+        """
+        pass
