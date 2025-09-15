@@ -799,14 +799,14 @@ class GPClassificationRunner:
         Adaptive natural-gradient step size
         This is a customized schedule:
         1) Warmup (5% of self.maxiter): linearly ramping from 0 -> self.gamma
-        2) Boosting (next 15%): boost from self.gamma to 3 * self.gamma
-        3) Cosine decay (remaining 80%): decaying from 3 * self.gamma to 0.5 * self.gamma
+        2) Boosting (next 15%): boost from self.gamma to 5 * self.gamma
+        3) Cosine decay (remaining 80%): decaying from 5 * self.gamma to 0.5 * self.gamma
         """
         # Define values of gammas to use in the schedule
         gamma_main = self.gamma
-        gamma_boost = 3 * self.gamma
+        gamma_boost = 5 * self.gamma
         gamma_floor = 0.5 * self.gamma
-        safety_gamma = 1e-12
+        safety_gamma = 1e-6
 
         # Phase boundaries
         warmup_steps = max(int(math.ceil(0.05 * self.maxiter)), 1)  # first 5% of steps
