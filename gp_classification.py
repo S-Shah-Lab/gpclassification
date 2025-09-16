@@ -39,6 +39,7 @@ import math
 from copy import deepcopy
 import datetime as dt
 from dataclasses import dataclass, asdict
+from itertools import combinations
 
 # dataclass: decorator that examines a class to get the fields (class variable with a type annotations)
 # asdict: method that converts the dataclass object into a dictionary (grabs fields and stores them into a dict)
@@ -371,8 +372,11 @@ class GPClassificationRunner:
         self._plot_topomap()
 
         self._plot_confusion_matrix()
-        self.feature_pair = (0, 1)
-        self._plot_features_and_boundary()
+
+        pairs = combinations(range(self.nf), 2)
+        for pair in pairs:
+            self.feature_pair = pair
+            self._plot_features_and_boundary()
 
         # Diagnostic on the variational parameters
         self._plot_vgp_latent_marginals()
@@ -2385,16 +2389,18 @@ class GPClassificationRunner:
 
             # Plot each provided weight vector as a topomap
             for k in range(ks):
-                vmax = cm[i].max()
-                axes[i].imshow(cm[i], cmap="Greens", vmin=0, vmax=vmax)
-                if i == 0:
-                    axes[i].set_title(f"{label[i]} (Iter {iter})")
+                vmax = cm[k].max()
+                axes[k].imshow(cm[k], cmap="Greens", vmin=0, vmax=vmax)
+                if k == 0:
+                    axes[k].set_title(f"{label[k]} (Iter {iter})", fontsize=9)
                 else:
-                    axes[i].set_title(f"{label[i]}")
-                axes[i].set_xlabel(f"Predicted P(y=1) > {self.pred_threshold})")
-                axes[i].set_ylabel("True")
-                for (i, j), v in np.ndenumerate(cm[i]):
-                    axes[i].text(j, i, int(v), ha="center", va="center")
+                    axes[k].set_title(f"{label[k]}")
+                axes[k].set_xlabel(
+                    f"Predicted P(y=1) > {self.pred_threshold}", fontsize=9
+                )
+                axes[k].set_ylabel("True", fontsize=9)
+                for (i, j), v in np.ndenumerate(cm[k]):
+                    axes[k].text(j, i, int(v), ha="center", va="center", fontsize=9)
 
             fig.tight_layout()
             fig.savefig(self.run_dir / "08_confusion_matrix.png", dpi=150)
