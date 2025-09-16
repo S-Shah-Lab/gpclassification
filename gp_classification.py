@@ -370,11 +370,15 @@ class GPClassificationRunner:
         self._plot_kernel_eigs()  # diagnostic for Grahm matrix
         self._plot_topomap()
 
+        self._plot_confusion_matrix()
+        self.feature_pair = (0, 1)
+        self._plot_features_and_boundary()
+
         # Diagnostic on the variational parameters
-        self._plot_q_latent_marginals()
-        self._plot_q_z_hist()
-        self._plot_q_corr_block()
-        self._plot_q_spectrum()
+        self._plot_vgp_latent_marginals()
+        self._plot_posterior_q_standardized()
+        self._plot_posterior_q_correlation_block()
+        self._plot_posterior_covariance_eigs()
         self._plot_uncertainty_vs_error()
 
         # TODO: plot decision boundary and features
@@ -845,9 +849,8 @@ class GPClassificationRunner:
         Gamma parameter is adapted before the step
         """
         if self.natgrad is not None:
-            # Adapt gamma value before taking the step if adaptation flag is True
-            if self.enable_adaptation:
-                self.natgrad.gamma = self._adapt_gamma()
+            # Adapt gamma value before taking the step
+            self.natgrad.gamma = self._adapt_gamma()  # always happens
             # Natrual Gradient step
             self.natgrad.minimize(
                 lambda: self.loss_fn(self.model),
@@ -867,9 +870,6 @@ class GPClassificationRunner:
         - If `use_validation_for_adaptation` and a validation set exist, use `nlpd_val`
         - Otherwise fall back to `nlml` (training objective)
         """
-
-        # TODO: modify the inspection of the learning rate to make sure cooldown is not affected by the metric (e.g. NLML) increasing
-        # that is an easy but wrong way to force a learning rate adaptation since the metric doesn't improve from `best`
 
         # Grab current state of structure for learning rate adaptation
         st = self._lr_state
@@ -910,12 +910,13 @@ class GPClassificationRunner:
 
             # If metric is unusable, keep current learning rate
             if metric is None or not np.isfinite(metric):
-                return _assign_lr(st["lr"])  # assign and update learning rate
+                return _assign_lr(st["lr"])  # assign and basically keep learning rate
             else:
                 if st["ema"] is None:
                     st["ema"] = metric  # assign current metric to EMA
                 else:
-                    # Update EMA using current metric and previous EMA
+                    # Update EMA using (previous EMA) * beta + (current metric) * (1-beta)
+                    # This means the higher the beta the more "memory" is preserved
                     st["ema"] = (
                         st["ema_beta"] * st["ema"] + (1.0 - st["ema_beta"]) * metric
                     )
@@ -924,12 +925,14 @@ class GPClassificationRunner:
                 signed_rel_change = (st["ema"] - st["best"]) / (st["best"] + 1e-12)
                 # Check if EMA is better than best value, compare it to tolerance
                 if signed_rel_change < 0 and abs(signed_rel_change) > st["tolerance"]:
+                    # Clear improvement
                     st["best"] = st["ema"]  # update best value with current EMA
                     st["cooldown"] = st["patience"]  # reset cooldown
                     return _assign_lr(
                         st["lr"]
                     )  # assign current learning rate (no update)
                 else:
+                    # No improvement
                     # No update on `best` value occurs
                     if st["cooldown"] > 0:
                         st["cooldown"] -= 1  # count a step down from cooldown
@@ -945,6 +948,71 @@ class GPClassificationRunner:
                         return _assign_lr(
                             new_lr
                         )  # assign new learning rate (decay update)
+
+    """
+    def _adapt_learning_rate(self) -> float:
+        '''
+        Adapt Adam base learning rate with the following schedule
+        1) Warmup (2% of self.maxiter): linearly ramping from 0 to self.learning_rate
+        2) Reduce-on-plateau: when the monitored objective stops improving, implement cosine decay
+
+        Monitored metric:
+        - If `use_validation_for_adaptation` and a validation set exist, use `nlpd_val`
+        - Otherwise fall back to `nlml` (training objective)
+        
+        Scenarios taken into account (factor = EMA / best):
+        (1) |factor - 1| <= tolerance: 
+          * Small change, apply a patient_factor to extend cooldown, leads to potential decay
+        (2) |factor - 1| > tolerance:
+          * factor > 1  -> metric increased (worse): immediate decay, reset patience.
+          * factor < 1  -> metric decreased (better): update best, optional small LR boost.
+        '''
+        # Grab current state of structure for learning rate adaptation
+        st = self._lr_state
+        st["step"] = self.step
+
+        # Helper function to set optimizer LR with clipping
+        def _assign_lr(new_lr: float) -> float:
+            new_lr = float(np.clip(new_lr, st["min_lr"], st["base_lr"]))
+            try:
+                # Works when the optimizer stores a tf.Variable
+                self.opt.learning_rate.assign(new_lr)
+            except Exception:
+                # Fallback when it's a plain Python float hyperparameter
+                self.opt.learning_rate = new_lr
+            st["lr"] = new_lr
+            return new_lr
+        
+        # Warmup (2% of maxiter): linearly ramping from 0 to self.learning_rate
+        if st["step"] <= st["warmup_steps"]:
+            # Assign and update learning rate
+            return _assign_lr(st["base_lr"] * st["step"] / max(1, st["warmup_steps"]))
+        
+        # Grab last entry in the log report, this should exist since warmup has already happened
+        last = self.logs[-1]
+
+        # Define metric to use for learning rate adaptation
+        # Check for flags, specifically validation first (if requested and available), else training
+        use_val = bool(getattr(self, "use_validation_for_adaptation", False)) and bool(
+            getattr(self, "has_val", False)
+        )
+        # grab NLPD on validation set or NLML on train set
+        metric = last.nlpd_val if use_val else last.nlml
+        
+        # If metric is unusable, keep current LR
+        if metric is None or not np.isfinite(metric):
+            return _assign_lr(st["lr"])
+        
+        # Update EMA
+        if st.get("ema", None) is None or not np.isfinite(st.get("ema", np.nan)):
+            # Assign current metric to EMA
+            st["ema"] = float(metric) 
+        else:
+            beta = float(st.get("ema_beta", 0.9))
+            # Update EMA using (previous EMA) * beta + (current metric) * (1-beta)
+            # This means the higher the beta the more "memory" is preserved
+            st["ema"] = beta * st["ema"] + (1.0 - beta) * float(metric)
+        """
 
     def _step_adam(self) -> None:
         """
@@ -2276,7 +2344,352 @@ class GPClassificationRunner:
         else:
             return
 
-    def _get_q_posterior(self) -> Optional[Dict[str, Any]]:
+    def _plot_confusion_matrix(self, iter: Optional[int] = None) -> None:
+        """
+        Plot confusion matrix for all the available sets
+        P(y=1) > self.pred_threshold
+        If `iter` is provided use that specific iteration, otherwise use the `best` iteration
+        """
+
+        if iter is None:
+            iter = self._best_iter
+            self._plot_confusion_matrix(iter=iter)
+
+        else:
+            iter_idx = iter - 1
+
+            y = self.Y_train.ravel().astype(int)
+            y_pred = np.array(self.run_log.y_train_seq[iter_idx]).ravel()
+            cm = [confusion_matrix(y, y_pred)]
+            label = ["train"]
+            ks = 1
+
+            if self.has_val:
+                y = self.Y_val.ravel().astype(int)
+                y_pred = np.array(self.run_log.y_val_seq[iter_idx]).ravel()
+                cm.append(confusion_matrix(y, y_pred))
+                label.append("val")
+                ks += 1
+
+            if self.has_test:
+                y = self.Y_test.ravel().astype(int)
+                y_pred = np.array(self.run_log.y_test_seq[iter_idx]).ravel()
+                cm.append(confusion_matrix(y, y_pred))
+                label.append("test")
+                ks += 1
+
+            # Plot
+            fig, axes = plt.subplots(1, ks, figsize=(4 * ks, 4))
+            if ks == 1:
+                axes = [axes]
+
+            # Plot each provided weight vector as a topomap
+            for k in range(ks):
+                vmax = cm[i].max()
+                axes[i].imshow(cm[i], cmap="Greens", vmin=0, vmax=vmax)
+                if i == 0:
+                    axes[i].set_title(f"{label[i]} (Iter {iter})")
+                else:
+                    axes[i].set_title(f"{label[i]}")
+                axes[i].set_xlabel(f"Predicted P(y=1) > {self.pred_threshold})")
+                axes[i].set_ylabel("True")
+                for (i, j), v in np.ndenumerate(cm[i]):
+                    axes[i].text(j, i, int(v), ha="center", va="center")
+
+            fig.tight_layout()
+            fig.savefig(self.run_dir / "08_confusion_matrix.png", dpi=150)
+            plt.close(fig)
+
+    def _compute_feature(self, f: int, iter: int) -> Dict[str, np.ndarray]:
+        """
+        Compute features using a given spatial filter column of index `f` at the iteration `iter`
+        To do so the method calls _retrieve_spatial_filter()
+
+        This method strongly depends on the kernel used
+        The feature matches the kernel's construction: z_f = w_f^T Σ_i w_f, optionally log-transformed
+        and ARD-scaled to mirror the kernel space
+        """
+        iter_idx = iter - 1
+
+        # Retrieve the spatial filter at `iter`
+        W = self._retrieve_spatial_filter(f=f, iter=iter).astype(float).ravel()
+
+        def _compute_on_split(X_flat: Optional[np.ndarray]) -> Optional[np.ndarray]:
+            if X_flat is None:
+                return None
+
+            # Reshape flattened (N, s*s) back to (N, s, s)
+            X_flat = np.asarray(X_flat, dtype=float)
+            N = X_flat.shape[0]
+            Sigma = X_flat.reshape(N, self.s, self.s)
+
+            # Compute z = w^T Σ w using vectorized tensordot
+            Sw = np.tensordot(Sigma, W, axes=([2], [0]))  # (N, s)
+            wSw = np.sum(Sw * W[None, :], axis=1)  # (N,)
+
+            # Optional log-transform to match kernel behavior
+            if getattr(self, "logged_flag", False):
+                wSw = np.log(wSw)
+
+            # Optional ARD scaling for spatial filter `f` on this feature if available at `iter`
+            try:
+                if getattr(self, "ard_flag", False) and self.run_log is not None:
+                    ard_vec = self.run_log.logs[iter_idx].ard
+                    if ard_vec is not None and len(ard_vec) > f:
+                        wSw = wSw * np.exp(ard_vec[f])
+            except Exception:
+                # If ARD is not present skip scaling
+                pass
+
+            return wSw.astype(float)
+
+        out: Dict[str, np.ndarray] = {}
+
+        out["train"] = _compute_on_split(self.X_train)
+        if self.has_val:
+            out["val"] = _compute_on_split(self.X_val)
+        if self.has_test:
+            out["test"] = _compute_on_split(self.X_test)
+        return out
+
+    def _compute_decision_boundary(self, iter: int) -> Dict[str, Any]:
+        """
+        Build a 2D decision surface in the selected feature-pair space using interpolation from predicted probabilties
+        on the train set P(y=1) at iteration `iter`
+
+        Feature-pair selection:
+            - If self.feature_pair exists, use it (clamped to [0, nf-1]).
+            - Otherwise default to (0, 1)
+
+        Returns
+
+        Dict[str, Any]
+            A dictionary containing:
+                'XX', 'YY', 'ZZ' : meshgrid and interpolated surface
+                'f1', 'f2'       : chosen feature indices
+                'fX_*', 'fY_*'   : raw 2D features per split (if available)
+        """
+        iter_idx = int(iter) - 1
+
+        # Choose feature pair
+        f1, f2 = getattr(self, "feature_pair", (0, 1))
+        f1 = int(np.clip(int(f1), 0, int(self.nf) - 1))
+        f2 = int(np.clip(int(f2), 0, int(self.nf) - 1))
+        if f1 == f2 and int(self.nf) > 1:
+            f2 = (f1 + 1) % int(self.nf)
+
+        # Compute features for the given pair
+        fX_dict = self._compute_feature(f=f1, iter=iter)
+        fY_dict = self._compute_feature(f=f2, iter=iter)
+
+        fX = np.asarray(fX_dict["train"], dtype=float).ravel()
+        fY = np.asarray(fY_dict["train"], dtype=float).ravel()
+
+        if fX is None or fY is None or fX.size == 0:
+            return {}
+
+        # Grid extent from train set with small padding
+        fX_min, fX_max = float(np.min(fX)), float(np.max(fX))
+        fY_min, fY_max = float(np.min(fY)), float(np.max(fY))
+        pad_x = 0.05 * (fX_max - fX_min + 1e-12)
+        pad_y = 0.05 * (fY_max - fY_min + 1e-12)
+
+        x_lin = np.linspace(fX_min - pad_x, fX_max + pad_x, 300)
+        y_lin = np.linspace(fY_min - pad_y, fY_max + pad_y, 300)
+        XX, YY = np.meshgrid(x_lin, y_lin)
+
+        # Train predicted probabilities at `iter`
+        p = np.asarray(self.run_log.p_train_seq[iter_idx], dtype=float).ravel()
+
+        # Interpolate P(y=1) onto the grid
+        pts = np.c_[fX, fY]
+        try:
+            ZZ = griddata(points=pts, values=p, xi=(XX, YY), method="cubic")
+        except Exception:
+            ZZ = griddata(points=pts, values=p, xi=(XX, YY), method="linear")
+
+        # Fill any holes with nearest neighbor interpolation
+        nan_mask = np.isnan(ZZ)
+        if np.any(nan_mask):
+            ZZ[nan_mask] = griddata(
+                points=pts, values=p, xi=(XX[nan_mask], YY[nan_mask]), method="nearest"
+            )
+
+        return {
+            "XX": XX,
+            "YY": YY,
+            "ZZ": ZZ,
+            "f1": f1,
+            "f2": f2,
+            "fX_train": fX,
+            "fY_train": fY,
+            "fX_val": fX_dict.get("val"),
+            "fY_val": fY_dict.get("val"),
+            "fX_test": fX_dict.get("test"),
+            "fY_test": fY_dict.get("test"),
+        }
+
+    def _add_decision_boundary(
+        self,
+        iter: int,
+        levels: Optional[List[float]] = None,
+    ) -> None:
+        """
+        Add contour lines of the decision surface on the current axis at a given iteration `iter`
+        Plot the level at self.pred_threshold as the main one in black, plot any additional levels in grey
+        """
+        if levels is None:
+            levels = [self.pred_threshold, 0.1, 0.9]
+
+        # Cache boundary per-iteration to avoid recomputation if the axis is redrawn
+        boundary = getattr(self, "_last_boundary", None)
+        if boundary is None or boundary.get("iter") != int(iter):
+            boundary = self._compute_decision_boundary(iter=iter)
+            boundary["iter"] = int(iter)
+            self._last_boundary = boundary
+
+        if not boundary:
+            return
+
+        XX, YY, ZZ = boundary["XX"], boundary["YY"], boundary["ZZ"]
+        ax = plt.gca()
+
+        # Emphasize the decision threshold
+        if self.pred_threshold in levels:
+            thr = self.pred_threshold
+            cs_thr = ax.contour(
+                XX, YY, ZZ, levels=[thr], linewidths=2.0, colors="black"
+            )
+            ax.clabel(cs_thr, fmt={thr: f"p={thr:.2f}"}, inline=True, fontsize=8)
+            other = [lv for lv in levels if lv != thr]
+        else:
+            other = list(levels)
+
+        # Draw auxiliary levels
+        if other:
+            ax.contour(
+                XX, YY, ZZ, levels=other, linewidths=1.0, colors="grey", linestyles="--"
+            )
+
+    def _plot_features_and_boundary(self, iter: Optional[int] = None) -> None:
+        """
+        Scatter the selected feature pair for train / val / test and overlay the decision boundary
+        Feature pair is read from `self.feature_pair` if present; otherwise defaults to (0, 1)
+        """
+        # Define iteration, if not provided use self._best_iter
+        if iter is None:
+            iter = self._best_iter
+            self._plot_features_and_boundary(iter)
+        else:
+            boundary = self._compute_decision_boundary(iter=iter)
+            if not boundary:
+                return
+
+            f1, f2 = boundary["f1"], boundary["f2"]
+            fX_train, fY_train = boundary["fX_train"], boundary["fY_train"]
+            fX_val, fY_val = boundary.get("fX_val"), boundary.get("fY_val")
+            fX_test, fY_test = boundary.get("fX_test"), boundary.get("fY_test")
+
+            fig, ax = plt.subplots(figsize=(6, 5))
+
+            # Train points
+            if fX_train is not None and fY_train is not None:
+                ax.scatter(
+                    fX_train,
+                    fY_train,
+                    c=["orange" if y == 0 else "navy" for y in self.Y_train.ravel()],
+                    s=44,
+                    marker="o",
+                    linewidth=0.4,
+                    alpha=0.2,
+                    # label="train",
+                )
+                handles = [
+                    plt.Line2D(
+                        [0],
+                        [0],
+                        marker="o",
+                        color="w",
+                        markerfacecolor="k",
+                        markersize=8,
+                        alpha=0.2,
+                        label="Train",
+                    )
+                ]
+
+            # Validation points
+            """
+            if self.has_val and fX_val is not None and fY_val is not None:
+                ax.scatter(
+                    fX_val,
+                    fY_val,
+                    c=["orange" if y == 0 else "navy" for y in self.Y_val.ravel()],
+                    s=28,
+                    marker="s",
+                    linewidth=0.4,
+                    alpha=0.7,
+                    #label="val",
+                )
+                handles.append(plt.Line2D(
+                    [0],
+                    [0],
+                    marker="s",
+                    color="w",
+                    markerfacecolor="k",
+                    markersize=8,
+                    alpha=0.7,
+                    label="Val",
+                ))
+            """
+
+            # Test points
+            if self.has_test and fX_test is not None and fY_test is not None:
+                ax.scatter(
+                    fX_test,
+                    fY_test,
+                    c=["orange" if y == 0 else "navy" for y in self.Y_test.ravel()],
+                    s=22,
+                    marker="^",
+                    linewidth=0.4,
+                    alpha=1,
+                    # label="test",
+                )
+                handles.append(
+                    plt.Line2D(
+                        [0],
+                        [0],
+                        marker="^",
+                        color="w",
+                        markerfacecolor="k",
+                        markersize=6,
+                        alpha=1,
+                        label="Test",
+                    )
+                )
+
+            # Overlay boundary
+            self._add_decision_boundary(
+                iter=iter, levels=[self.pred_threshold, 0.1, 0.9]
+            )
+
+            # Labels and aesthetics
+            x_label = rf"$w_{f1}^T \Sigma w_{f1}$"
+            y_label = rf"$w_{f2}^T \Sigma w_{f2}$"
+            x_label = (
+                f"log({x_label})" if getattr(self, "logged_flag", False) else x_label
+            )
+            y_label = (
+                f"log({y_label})" if getattr(self, "logged_flag", False) else y_label
+            )
+            ax.set_xlabel(x_label)
+            ax.set_ylabel(y_label)
+            ax.set_title(f"Iter {iter}", fontsize=9)
+            ax.legend(handles=handles, loc="best", fontsize=8, frameon=True)
+            fig.tight_layout()
+            fig.savefig(self.run_dir / "09_features_and_boundary.png", dpi=150)
+            plt.close(fig)
+
+    def _get_posterior_q(self) -> Optional[Dict[str, Any]]:
         """
         Extract posterior mean m and variance diag v from (q_mu, q_sqrt)
         Supports both full and diagonal variational covariances
@@ -2323,7 +2736,7 @@ class GPClassificationRunner:
 
         return {"m": m, "v": v, "L": L, "logdetS": logdetS, "full": full}
 
-    def _plot_q_latent_marginals(self) -> None:
+    def _plot_vgp_latent_marginals(self) -> None:
         """
         Latent mean vs uncertainty for training points
         Note: confident predictions should have large |m_i| values and small sqrt(v_i)
@@ -2342,7 +2755,7 @@ class GPClassificationRunner:
                 The posterior over f at most training inputs is not pulled away from the prior
                 The model is not extracting separability from the data except for a handful of cases
         """
-        q = self._get_q_posterior()
+        q = self._get_posterior_q()
         if q is None:
             return
         m, v = q["m"], q["v"]
@@ -2358,10 +2771,10 @@ class GPClassificationRunner:
         ax.set_ylabel("Latent mean ± 2σ")
         ax.set_title("VGP latent marginals")
         fig.tight_layout()
-        fig.savefig(self.run_dir / "08_q_latent_marginals.png", dpi=150)
+        fig.savefig(self.run_dir / "10_vgp_latent_marginals.png", dpi=150)
         plt.close(fig)
 
-    def _plot_q_z_hist(self) -> None:
+    def _plot_posterior_q_standardized(self) -> None:
         """
         Histogram of standardized latents z_i = m_i / sqrt(v_i)
         If the variational posterior is well-behaved, this should look roughly N(0, 1) under a prior-ish regime
@@ -2376,7 +2789,7 @@ class GPClassificationRunner:
             A broader |z| spread, with a healthy chunk beyond |z| > 2 would be noticed
             Can be identified as "nearly prior" behavior
         """
-        q = self._get_q_posterior()
+        q = self._get_posterior_q()
         if q is None:
             return
         m, v = q["m"], q["v"]
@@ -2388,10 +2801,10 @@ class GPClassificationRunner:
         ax.set_ylabel("Density")
         ax.set_title("Posterior standardized latents")
         fig.tight_layout()
-        fig.savefig(self.run_dir / "09_q_z_hist.png", dpi=150)
+        fig.savefig(self.run_dir / "11_posterior_q_standardized.png", dpi=150)
         plt.close(fig)
 
-    def _plot_q_corr_block(self, max_block: int = 64) -> None:
+    def _plot_posterior_q_correlation_block(self, max_block: int = 64) -> None:
         """
         Correlation heatmap for a subset of the variational covariance
         For full q_sqrt, builds S_I = L[I,:] L[I,:]^T for evenly spaced indices I
@@ -2405,7 +2818,7 @@ class GPClassificationRunner:
             Correlation heatmap ~ identity
             It is possible that your kernel prior is already near diagonal, K ~ σ^2 I
         """
-        q = self._get_q_posterior()
+        q = self._get_posterior_q()
         if q is None:
             return
 
@@ -2428,10 +2841,10 @@ class GPClassificationRunner:
         ax.set_ylabel("Index")
         fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
         fig.tight_layout()
-        fig.savefig(self.run_dir / "10_q_corr_block.png", dpi=150)
+        fig.savefig(self.run_dir / "12_posterior_q_correlation_block.png", dpi=150)
         plt.close(fig)
 
-    def _plot_q_spectrum(self) -> None:
+    def _plot_posterior_covariance_eigs(self) -> None:
         """
         Spectrum of the posterior covariance S = q_sqrt q_sqrt.T
         For diagonal forms, this reduces to sorted variances
@@ -2446,7 +2859,7 @@ class GPClassificationRunner:
             For diagonal q, these are just the variances, so v_i ~ constant at ~1 for almost all i
             Translated to the posterior variance barely shrank from the prior
         """
-        q = self._get_q_posterior()
+        q = self._get_posterior_q()
         if q is None:
             return
 
@@ -2461,30 +2874,23 @@ class GPClassificationRunner:
             eigs = np.maximum(np.linalg.eigvalsh(Ssub), eps)
         else:
             # Diagonal q, eigenvalues are the variances
-            eigs = np.maximum(np.sort(q["v"])[::-1], eps)
-        """
-        fig, ax = plt.subplots(figsize=(6.2, 4.2))
-        ax.semilogy(np.arange(len(eigs)), eigs, lw=1.8)
-        ax.set_xlabel("Index (sorted)")
-        ax.set_ylabel("Eigenvalue (log scale)")
-        ax.set_title("Posterior covariance spectrum")
-        fig.tight_layout()
-        fig.savefig(self.run_dir / "11_q_spectrum.png", dpi=150)
-        plt.close(fig)
-        """
+            eigs = np.maximum(q["v"], eps)
+
         v_sorted = np.sort(eigs)[::-1]
         idxs = np.arange(1, len(v_sorted) + 1)
 
+        # Cumulative energy
         total = float(v_sorted.sum())
         cum = np.cumsum(v_sorted) / (total if total > 0 else 1.0)
 
+        # Diagnostics
         vmax = float(v_sorted[0]) if v_sorted.size else 0.0
         vpos = v_sorted[v_sorted > 0]
         vmin_pos = float(vpos[-1]) if vpos.size else 0.0
         cond = float(vmax / vmin_pos) if vmin_pos > 0 else float("inf")
         eff_rank = int(np.searchsorted(cum, 0.99) + 1) if total > 0 else 0
 
-        # Plot: match the style of _plot_kernel_eigs
+        # Plot: match the style of _plot_kernel_eigs()
         fig, ax1 = plt.subplots(figsize=(7, 4.5))
         ax1.semilogy(
             idxs,
@@ -2536,14 +2942,14 @@ class GPClassificationRunner:
             bbox=dict(boxstyle="round", facecolor="white", alpha=0.7, linewidth=0.5),
         )
 
-        # Combined legend
+        # Legend handling
         lines1, labels1 = ax1.get_legend_handles_labels()
         lines2, labels2 = ax2.get_legend_handles_labels()
         if lines1 or lines2:
             ax1.legend(lines1 + lines2, labels1 + labels2, loc="best", fontsize=8)
 
         fig.tight_layout()
-        fig.savefig(self.run_dir / "11_q_spectrum.png", dpi=150)
+        fig.savefig(self.run_dir / "13_posterior_covariance_eigs.png", dpi=150)
         plt.close(fig)
 
     def _plot_uncertainty_vs_error(self) -> None:
@@ -2562,7 +2968,7 @@ class GPClassificationRunner:
                 Either q_sqrt didn't move, or the probabilities are computed in a way that ignores v (e.g., using only the mean f)
                 If the probabilities are true variational predictives, expect high variance to shove probabilities toward 0.5
         """
-        q = self._get_q_posterior()
+        q = self._get_posterior_q()
         if q is None:
             return
         if self.Y_train is None or not self.run_log or not self.run_log.p_train_best:
@@ -2582,5 +2988,5 @@ class GPClassificationRunner:
         ax.set_title("Uncertainty vs. classification errors (train)")
         ax.legend(loc="best")
         fig.tight_layout()
-        fig.savefig(self.run_dir / "12_uncertainty_vs_error.png", dpi=150)
+        fig.savefig(self.run_dir / "14_uncertainty_vs_error.png", dpi=150)
         plt.close(fig)
