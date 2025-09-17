@@ -349,6 +349,14 @@ class GPClassificationRunner:
         #    self._kfold_cv_nlml()
 
         self._initialize_W_matrix()  # W_init
+
+        # Define model by specifying kernel, likelihood, and method
+        self._build_model()  # self.kernel, self.likelihood, self.model
+        # self._warm_start_variational()
+
+        # Define optimizers
+        self._build_optimizers()  # self.opt, self.natgrad
+
         self._train()
         self._write_config_file()  # Write config file to `config.json`
         self._build_and_write_runlog()  # Build and write RunLog
@@ -763,23 +771,70 @@ class GPClassificationRunner:
             # that closes over minibatches and a separate dataset.
         return
 
+    def _warm_start_variational(
+        self, mu_scale: float = 2.0, jitter: float = 1e-6
+    ) -> None:
+        """
+        Heuristic warm start for variational parameters
+        - q_mu: align with labels (±1) and scaled by mu_scale
+        - q_sqrt: identity Cholesky (per output), with tiny jitter
+        Works for both full and diagonal parameterizations
+        """
+        if not hasattr(self, "model") or self.model is None:
+            return
+        if not (hasattr(self.model, "q_mu") and hasattr(self.model, "q_sqrt")):
+            return
+
+        # Build ±1 targets from {0,1} labels
+        y = np.asarray(self.Y_train).reshape(-1)
+        ypm = 2.0 * y - 1.0  # 0 -> -1, 1 -> +1
+
+        # q_mu shape [N, P]
+        q_mu = self.model.q_mu
+        N, P = int(q_mu.shape[0]), int(q_mu.shape[1])
+        mu = (ypm[:, None] * mu_scale).astype(np.float64)
+        if P > 1:
+            mu = np.tile(mu, (1, P))
+        self.model.q_mu.assign(mu)
+
+        # q_sqrt can be [P, N, N] (full) or [P, N] (diag)
+        q_sqrt = self.model.q_sqrt
+        if len(q_sqrt.shape) == 3:
+            # full: per-output lower-triangular Cholesky factors
+            P_, N_, _ = map(int, q_sqrt.shape)
+            eye = np.eye(N_, dtype=np.float64) * (1.0 + jitter)
+            L = np.stack([np.tril(eye.copy()) for _ in range(P_)], axis=0)
+            q_sqrt.assign(L)
+        elif len(q_sqrt.shape) == 2:
+            # diag: per-output sqrt-variances
+            P_, N_ = map(int, q_sqrt.shape)
+            q_sqrt.assign(np.ones((P_, N_), dtype=np.float64) * (1.0 + jitter))
+        else:
+            # shrug, leave it alone if a custom form shows up
+            pass
+
     def _build_optimizers(self) -> None:
         """
-        Build GPflow optimizers
+        Build GPflow optimizers and a dictionary for learning rate adaptation
         """
         # Initialization of self contained structure for learning rate adaptation
         self._lr_state = {
             "step": 0,
-            "lr": self.learning_rate,
-            "base_lr": self.learning_rate,
-            "min_lr": 1e-5,
+            "lr": self.learning_rate,  # current LR value
+            "base_lr": self.learning_rate,  # starting LR value
+            "min_lr": 1e-5,  # mininum allowed
+            "max_lr": self.learning_rate,  # maximum allowed
             "decay_factor": 0.5,  # decay factor on plateau
-            "patience": max(int(0.05 * self.maxiter), 20),  # ~15% of self.maxiter
-            "cooldown": 0,
-            "tolerance": 1e-3,
-            "best": 1e4,
-            "ema": None,  # evaluation of exponential moving average (EMA)
-            "ema_beta": 0.8,  # decay factor for EMA, lower values -> faster decay
+            "patience": max(
+                int(0.05 * self.maxiter), 20
+            ),  # number of steps allowed for repeated plateau behavior
+            "cooldown": min(
+                int(0.05 * self.maxiter), 20
+            ),  # general counter to avoid instant reactions
+            "tolerance": 1e-3,  # value used to define change in metric
+            "best": 1e4,  # best metric value seen
+            "ema": None,  # exponential moving average (EMA) of metric
+            "ema_beta": 0.8,  # decay factor for EMA
             "warmup_steps": max(int(0.02 * self.maxiter), 10),  # ~2% warmup steps
         }
 
@@ -869,29 +924,27 @@ class GPClassificationRunner:
         """
         Return the scalar metric for LR adaptation at the current model state:
         - validation NLPD if available and enabled,
-        - otherwise training NLML.
+        - otherwise training NLML
         """
         try:
             if getattr(self, "use_validation_for_adaptation", False) and getattr(
                 self, "has_val", False
             ):
-                if self.X_val is None or self.Y_val is None:
-                    return None
                 p_val = self._predict_prob(self.model, self.X_val)
                 m_val = self._compute_metrics(self.Y_val, p_val)
                 nlpd = m_val.get("nlpd", None)
                 return float(nlpd) if nlpd is not None else None
-            # Training NLML
-            return float(self.loss_fn(self.model).numpy())
+            else:
+                return float(self.loss_fn(self.model).numpy())
         except Exception:
             return None
 
     def _adapt_learning_rate(self) -> float:
         """
-        Adapt Adam learning rate using ONLY the EMA of the chosen metric.
+        Adapt Adam learning rate using ONLY the EMA of the chosen metric
         Metric:
             - NLML on train, unless validation is present AND
-            `use_validation_for_adaptation` is True, then use val NLPD.
+            `use_validation_for_adaptation` is True, then use val NLPD
         Delta:
             - delta := EMA_t - EMA_{t-1} of the chosen metric.
         Policy:
@@ -899,46 +952,52 @@ class GPClassificationRunner:
             - delta >= +big_delta       -> big WORSE jump; stronger decay, cooldown.
             - delta <= -big_delta       -> big BETTER drop; gentle growth, cooldown.
             - otherwise                 -> small move; reset plateau on improvement.
-        Returns
-        -------
-        float
-            Current learning rate after any adaptation.
+
+        The method _build_optimizers() builds the dictionary `self._lr_state` which is apdated as the training progresses
         """
         s = self._lr_state
 
-        # Defaults for new keys used here
-        s.setdefault("plateau_count", 0)
-        s.setdefault("big_change_mult", 6)  # big = 3 * tolerance
+        # Generate some default new keys for the learning rate dictionary `self._lr_state`
+        s.setdefault("plateau_count", 0)  # number of steps in EMA plateau
+        s.setdefault("big_change_mult", 6)  # scaling factor to define big change
         s.setdefault("growth_factor", 1.2)  # LR bump on big improvement
         s.setdefault("min_steps_between_growth", 40)
         s.setdefault("last_growth_step", -(10**9))
-        s.setdefault("max_lr", float(s.get("base_lr", 1e-2)))  # LR upper cap
-        s.setdefault("cooldown_max", max(int(0.05 * self.maxiter), 5))
+        s.setdefault("cooldown_max", min(20, int(0.05 * self.maxiter)))
         s.setdefault("ema_prev", None)
 
         # Tick step and cooldown
         s["step"] = self.step
-        if s.get("cooldown", 0) > 0:
-            s["cooldown"] = int(s["cooldown"]) - 1
 
         if s["step"] == 1:
-            print(f"  [lr] warm up phase")
+            print(f"  [lr] warm up phase")  # starting point
 
-        # Warmup: linear ramp to base_lr
+        if s.get("cooldown", 0) > 0:
+            # Decrease cooldown counter each step
+            s["cooldown"] = int(s["cooldown"]) - 1
+
+        # Warmup: linear ramp to `base_lr`
         if s["step"] <= int(s["warmup_steps"]):
             prev_lr = float(s["lr"])
-            warm_lr = float(s["base_lr"]) * (s["step"] / float(s["warmup_steps"]))
+            warm_lr = float(s["base_lr"]) * (
+                s["step"] / float(s["warmup_steps"])
+            )  # ramping
             new_lr = max(float(warm_lr), float(s["min_lr"]))
+            # Check the new LR is not close in value to the previous one (default tolerance 1e-8)
             if not np.isclose(new_lr, prev_lr):
+                # Assign new LR
                 s["lr"] = float(new_lr)
                 self.opt.learning_rate = float(new_lr)
-                # print(f"  [lr] changed to {s['lr']:.6g} at iter {self.step}")
+
             # Prime EMA during warmup so delta is defined later
             mv = self._current_adaptation_metric_value()
             if mv is not None and np.isfinite(mv):
                 if s.get("ema") is None:
+                    # Assing metric to EMA
                     s["ema"] = float(mv)
                 else:
+                    # Calculate EMA using beta decay factor
+                    # Higher beta values preserve more memories
                     beta = float(s["ema_beta"])
                     s["ema"] = float(beta * s["ema"] + (1.0 - beta) * float(mv))
                 s["ema_prev"] = float(s["ema"])
@@ -950,6 +1009,7 @@ class GPClassificationRunner:
             return float(s["lr"])
 
         if s.get("ema") is None:
+            # Assing metric to EMA
             s["ema"] = float(mv)
             s["ema_prev"] = float(s["ema"])
             return float(s["lr"])
@@ -958,54 +1018,59 @@ class GPClassificationRunner:
         beta = float(s["ema_beta"])
         curr_ema = float(beta * prev_ema + (1.0 - beta) * float(mv))
         s["ema"] = curr_ema
-        delta = float(curr_ema - prev_ema)  # EMA-only delta
 
+        # Define delta to judge EMA evolution
+        delta = float(curr_ema - prev_ema)  # EMA-only delta
         tol = float(s["tolerance"])
         big_delta = float(s["big_change_mult"]) * tol
-
         lr = float(s["lr"])
         new_lr = lr
         changed = False
 
         # Decision logic
         if abs(delta) <= tol:
-            # Plateau logic
+            # Plateau logic, EMA didn't change significantly
             s["plateau_count"] += 1
-            if s["plateau_count"] >= int(s["patience"]) and s.get("cooldown", 0) == 0:
+            # if s["plateau_count"] >= int(s["patience"]) and s.get("cooldown", 0) == 0:
+            if s["plateau_count"] >= int(s["patience"]):
+                # Too many steps on plateau, no more patience, time to adapt LR with decay
                 new_lr = max(lr * float(s["decay_factor"]), float(s["min_lr"]))
-                s["plateau_count"] = 0
-                s["cooldown"] = int(s["cooldown_max"])
+                s["plateau_count"] = 0  # reset count to 0
+                s["cooldown"] = int(s["cooldown_max"])  # reset cooldown to max
                 changed = True
 
         elif delta >= big_delta:
-            # Big worse jump
+            # Positive jump, with EMA increasing
             if s.get("cooldown", 0) == 0:
-                new_lr = max(lr * float(s["decay_factor"]) * 0.5, float(s["min_lr"]))
-                s["plateau_count"] = 0
-                s["cooldown"] = int(s["cooldown_max"])
+                # Enough steps with EMA increasing, time to adapt LR with decay
+                new_lr = max(lr * float(s["decay_factor"]), float(s["min_lr"]))
+                s["plateau_count"] = 0  # reset count to 0
+                s["cooldown"] = int(s["cooldown_max"])  # reset cooldown to max
                 changed = True
             else:
-                s["plateau_count"] = 0
+                s["plateau_count"] = 0  # reset count to 0
 
         elif delta <= -big_delta:
-            # Big BETTER drop -> gentle growth, but not too chatty
-            can_grow = s.get("cooldown", 0) == 0 and (
-                s["step"] - s["last_growth_step"]
-            ) >= int(s["min_steps_between_growth"])
+            # Negative jump, with EMA decreasing
+            # Judge if enough step have passed between last LR bump, if so
+            can_grow = (s["step"] - s["last_growth_step"]) >= int(
+                s["min_steps_between_growth"]
+            )
             if can_grow:
+                # Bump LR for faster convergence
                 new_lr = min(lr * float(s["growth_factor"]), float(s["max_lr"]))
-                s["plateau_count"] = 0
-                s["cooldown"] = int(s["cooldown_max"])  # full cooldown after growth
-                s["last_growth_step"] = s["step"]
+                s["plateau_count"] = 0  # reset count to 0
+                s["cooldown"] = int(s["cooldown_max"])  # reset cooldown to max
+                s["last_growth_step"] = s["step"]  # overwrite last step of LR growth
                 changed = True
 
         else:
-            # Minor change: reset plateau on improvement only
+            # Minor change: reset plateau on improvement only and keep current LR
             if delta < 0:
-                s["plateau_count"] = 0
+                s["plateau_count"] = 0  # reset count to 0
 
-        # Apply LR change if any
         if changed and not np.isclose(new_lr, lr):
+            # Overwrite LR with adapted LR
             s["lr"] = float(new_lr)
             self.opt.learning_rate = float(new_lr)
             print(f"  [lr] changed to {s['lr']:.6g} at iter {self.step}")
@@ -1352,13 +1417,9 @@ class GPClassificationRunner:
         pass
 
     def _train(self) -> None:
-        """ """
-        # Define model by specifying kernel, likelihood, and method
-        self._build_model()  # self.kernel, self.likelihood, self.model
-
-        # Define optimizers
-        self._build_optimizers()  # self.opt, self.natgrad
-
+        """
+        Perform training process by defining the loss function and performing steps with Adam and NG optimizers
+        """
         # Define loss function
         self.loss_fn = self.external_training_loss_fn or (lambda m: m.training_loss())
 
