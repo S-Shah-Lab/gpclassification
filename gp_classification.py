@@ -366,6 +366,7 @@ class GPClassificationRunner:
         self._plot_learning_curves()
         self._plot_threshold_sweep()
         self._plot_calibration_curves()
+        self._plot_learning_rates()
         self._plot_kernel_scaling()
         self._plot_kernel_W()
         self._plot_kernel_eigs()  # diagnostic for Grahm matrix
@@ -773,9 +774,9 @@ class GPClassificationRunner:
             "base_lr": self.learning_rate,
             "min_lr": 1e-5,
             "decay_factor": 0.5,  # decay factor on plateau
-            "patience": max(int(0.15 * self.maxiter), 50),  # ~15% of self.maxiter
+            "patience": max(int(0.05 * self.maxiter), 20),  # ~15% of self.maxiter
             "cooldown": 0,
-            "tolerance": 1e-4,
+            "tolerance": 1e-3,
             "best": 1e4,
             "ema": None,  # evaluation of exponential moving average (EMA)
             "ema_beta": 0.8,  # decay factor for EMA, lower values -> faster decay
@@ -864,159 +865,154 @@ class GPClassificationRunner:
         else:
             return
 
+    def _current_adaptation_metric_value(self) -> Optional[float]:
+        """
+        Return the scalar metric for LR adaptation at the current model state:
+        - validation NLPD if available and enabled,
+        - otherwise training NLML.
+        """
+        try:
+            if getattr(self, "use_validation_for_adaptation", False) and getattr(
+                self, "has_val", False
+            ):
+                if self.X_val is None or self.Y_val is None:
+                    return None
+                p_val = self._predict_prob(self.model, self.X_val)
+                m_val = self._compute_metrics(self.Y_val, p_val)
+                nlpd = m_val.get("nlpd", None)
+                return float(nlpd) if nlpd is not None else None
+            # Training NLML
+            return float(self.loss_fn(self.model).numpy())
+        except Exception:
+            return None
+
     def _adapt_learning_rate(self) -> float:
         """
-        Adapt Adam base learning rate with the following schedule
-        1) Warmup (2% of self.maxiter): linearly ramping from 0 to self.learning_rate
-        2) Reduce-on-plateau: when the monitored objective stops improving, implement cosine decay
-
-        Monitored metric:
-        - If `use_validation_for_adaptation` and a validation set exist, use `nlpd_val`
-        - Otherwise fall back to `nlml` (training objective)
+        Adapt Adam learning rate using ONLY the EMA of the chosen metric.
+        Metric:
+            - NLML on train, unless validation is present AND
+            `use_validation_for_adaptation` is True, then use val NLPD.
+        Delta:
+            - delta := EMA_t - EMA_{t-1} of the chosen metric.
+        Policy:
+            - |delta| <= tolerance      -> plateau; decay on patience, cooldown.
+            - delta >= +big_delta       -> big WORSE jump; stronger decay, cooldown.
+            - delta <= -big_delta       -> big BETTER drop; gentle growth, cooldown.
+            - otherwise                 -> small move; reset plateau on improvement.
+        Returns
+        -------
+        float
+            Current learning rate after any adaptation.
         """
+        s = self._lr_state
 
-        # Grab current state of structure for learning rate adaptation
-        st = self._lr_state
-        st["step"] = self.step
+        # Defaults for new keys used here
+        s.setdefault("plateau_count", 0)
+        s.setdefault("big_change_mult", 6)  # big = 3 * tolerance
+        s.setdefault("growth_factor", 1.2)  # LR bump on big improvement
+        s.setdefault("min_steps_between_growth", 40)
+        s.setdefault("last_growth_step", -(10**9))
+        s.setdefault("max_lr", float(s.get("base_lr", 1e-2)))  # LR upper cap
+        s.setdefault("cooldown_max", max(int(0.05 * self.maxiter), 5))
+        s.setdefault("ema_prev", None)
 
-        # Helper function to set optimizer LR with clipping
-        def _assign_lr(new_lr: float) -> float:
-            new_lr = float(np.clip(new_lr, st["min_lr"], st["base_lr"]))
-            try:
-                # Works when the optimizer stores a tf.Variable
-                self.opt.learning_rate.assign(new_lr)
-            except Exception:
-                # Fallback when it's a plain Python float hyperparameter
-                self.opt.learning_rate = new_lr
-            st["lr"] = new_lr
-            return new_lr
+        # Tick step and cooldown
+        s["step"] = self.step
+        if s.get("cooldown", 0) > 0:
+            s["cooldown"] = int(s["cooldown"]) - 1
 
-        # Warmup (2% of maxiter): linearly ramping from 0 to self.learning_rate
-        if st["step"] <= st["warmup_steps"]:
-            # Assign and update learning rate
-            return _assign_lr(st["base_lr"] * st["step"] / max(1, st["warmup_steps"]))
+        if s["step"] == 1:
+            print(f"  [lr] warm up phase")
 
-        # Consider to either use a fixed value learning rate after warmup or decay schedule
-        else:
-            # Grab last entry in the log report, this should exist since warmup has already happened
-            last = self.logs[-1]
-
-            # Define metric to use for learning rate adaptation
-            # Check for flags, specifically validation first (if requested and available), else training
-            use_val = bool(
-                getattr(self, "use_validation_for_adaptation", False)
-            ) and bool(getattr(self, "has_val", False))
-            metric = None
-            if use_val:
-                metric = last.nlpd_val  # grab NLPD on validation set
-            else:
-                metric = last.nlml  # grab NLML on train set
-
-            # If metric is unusable, keep current learning rate
-            if metric is None or not np.isfinite(metric):
-                return _assign_lr(st["lr"])  # assign and basically keep learning rate
-            else:
-                if st["ema"] is None:
-                    st["ema"] = metric  # assign current metric to EMA
+        # Warmup: linear ramp to base_lr
+        if s["step"] <= int(s["warmup_steps"]):
+            prev_lr = float(s["lr"])
+            warm_lr = float(s["base_lr"]) * (s["step"] / float(s["warmup_steps"]))
+            new_lr = max(float(warm_lr), float(s["min_lr"]))
+            if not np.isclose(new_lr, prev_lr):
+                s["lr"] = float(new_lr)
+                self.opt.learning_rate = float(new_lr)
+                # print(f"  [lr] changed to {s['lr']:.6g} at iter {self.step}")
+            # Prime EMA during warmup so delta is defined later
+            mv = self._current_adaptation_metric_value()
+            if mv is not None and np.isfinite(mv):
+                if s.get("ema") is None:
+                    s["ema"] = float(mv)
                 else:
-                    # Update EMA using (previous EMA) * beta + (current metric) * (1-beta)
-                    # This means the higher the beta the more "memory" is preserved
-                    st["ema"] = (
-                        st["ema_beta"] * st["ema"] + (1.0 - st["ema_beta"]) * metric
-                    )
+                    beta = float(s["ema_beta"])
+                    s["ema"] = float(beta * s["ema"] + (1.0 - beta) * float(mv))
+                s["ema_prev"] = float(s["ema"])
+            return float(s["lr"])
 
-                # Evaluate signed relative change
-                signed_rel_change = (st["ema"] - st["best"]) / (st["best"] + 1e-12)
-                # Check if EMA is better than best value, compare it to tolerance
-                if signed_rel_change < 0 and abs(signed_rel_change) > st["tolerance"]:
-                    # Clear improvement
-                    st["best"] = st["ema"]  # update best value with current EMA
-                    st["cooldown"] = st["patience"]  # reset cooldown
-                    return _assign_lr(
-                        st["lr"]
-                    )  # assign current learning rate (no update)
-                else:
-                    # No improvement
-                    # No update on `best` value occurs
-                    if st["cooldown"] > 0:
-                        st["cooldown"] -= 1  # count a step down from cooldown
-                        return _assign_lr(
-                            st["lr"]
-                        )  # assign current learning rate (no update)
-                    else:
-                        # Ran out of `patience`, too long in plateau condition
-                        # Reset `patience` and apply decay to learning rate
-                        st["cooldown"] = st["patience"]
-                        new_lr = st["lr"] * st["decay_factor"]
-                        print(f"  [lr] changed to {new_lr:.4f} at iter {self.step}")
-                        return _assign_lr(
-                            new_lr
-                        )  # assign new learning rate (decay update)
+        # Compute current metric and update EMA
+        mv = self._current_adaptation_metric_value()
+        if mv is None or not np.isfinite(mv):
+            return float(s["lr"])
 
-    """
-    def _adapt_learning_rate(self) -> float:
-        '''
-        Adapt Adam base learning rate with the following schedule
-        1) Warmup (2% of self.maxiter): linearly ramping from 0 to self.learning_rate
-        2) Reduce-on-plateau: when the monitored objective stops improving, implement cosine decay
+        if s.get("ema") is None:
+            s["ema"] = float(mv)
+            s["ema_prev"] = float(s["ema"])
+            return float(s["lr"])
 
-        Monitored metric:
-        - If `use_validation_for_adaptation` and a validation set exist, use `nlpd_val`
-        - Otherwise fall back to `nlml` (training objective)
-        
-        Scenarios taken into account (factor = EMA / best):
-        (1) |factor - 1| <= tolerance: 
-          * Small change, apply a patient_factor to extend cooldown, leads to potential decay
-        (2) |factor - 1| > tolerance:
-          * factor > 1  -> metric increased (worse): immediate decay, reset patience.
-          * factor < 1  -> metric decreased (better): update best, optional small LR boost.
-        '''
-        # Grab current state of structure for learning rate adaptation
-        st = self._lr_state
-        st["step"] = self.step
+        prev_ema = float(s["ema"])
+        beta = float(s["ema_beta"])
+        curr_ema = float(beta * prev_ema + (1.0 - beta) * float(mv))
+        s["ema"] = curr_ema
+        delta = float(curr_ema - prev_ema)  # EMA-only delta
 
-        # Helper function to set optimizer LR with clipping
-        def _assign_lr(new_lr: float) -> float:
-            new_lr = float(np.clip(new_lr, st["min_lr"], st["base_lr"]))
-            try:
-                # Works when the optimizer stores a tf.Variable
-                self.opt.learning_rate.assign(new_lr)
-            except Exception:
-                # Fallback when it's a plain Python float hyperparameter
-                self.opt.learning_rate = new_lr
-            st["lr"] = new_lr
-            return new_lr
-        
-        # Warmup (2% of maxiter): linearly ramping from 0 to self.learning_rate
-        if st["step"] <= st["warmup_steps"]:
-            # Assign and update learning rate
-            return _assign_lr(st["base_lr"] * st["step"] / max(1, st["warmup_steps"]))
-        
-        # Grab last entry in the log report, this should exist since warmup has already happened
-        last = self.logs[-1]
+        tol = float(s["tolerance"])
+        big_delta = float(s["big_change_mult"]) * tol
 
-        # Define metric to use for learning rate adaptation
-        # Check for flags, specifically validation first (if requested and available), else training
-        use_val = bool(getattr(self, "use_validation_for_adaptation", False)) and bool(
-            getattr(self, "has_val", False)
-        )
-        # grab NLPD on validation set or NLML on train set
-        metric = last.nlpd_val if use_val else last.nlml
-        
-        # If metric is unusable, keep current LR
-        if metric is None or not np.isfinite(metric):
-            return _assign_lr(st["lr"])
-        
-        # Update EMA
-        if st.get("ema", None) is None or not np.isfinite(st.get("ema", np.nan)):
-            # Assign current metric to EMA
-            st["ema"] = float(metric) 
+        lr = float(s["lr"])
+        new_lr = lr
+        changed = False
+
+        # Decision logic
+        if abs(delta) <= tol:
+            # Plateau logic
+            s["plateau_count"] += 1
+            if s["plateau_count"] >= int(s["patience"]) and s.get("cooldown", 0) == 0:
+                new_lr = max(lr * float(s["decay_factor"]), float(s["min_lr"]))
+                s["plateau_count"] = 0
+                s["cooldown"] = int(s["cooldown_max"])
+                changed = True
+
+        elif delta >= big_delta:
+            # Big worse jump
+            if s.get("cooldown", 0) == 0:
+                new_lr = max(lr * float(s["decay_factor"]) * 0.5, float(s["min_lr"]))
+                s["plateau_count"] = 0
+                s["cooldown"] = int(s["cooldown_max"])
+                changed = True
+            else:
+                s["plateau_count"] = 0
+
+        elif delta <= -big_delta:
+            # Big BETTER drop -> gentle growth, but not too chatty
+            can_grow = s.get("cooldown", 0) == 0 and (
+                s["step"] - s["last_growth_step"]
+            ) >= int(s["min_steps_between_growth"])
+            if can_grow:
+                new_lr = min(lr * float(s["growth_factor"]), float(s["max_lr"]))
+                s["plateau_count"] = 0
+                s["cooldown"] = int(s["cooldown_max"])  # full cooldown after growth
+                s["last_growth_step"] = s["step"]
+                changed = True
+
         else:
-            beta = float(st.get("ema_beta", 0.9))
-            # Update EMA using (previous EMA) * beta + (current metric) * (1-beta)
-            # This means the higher the beta the more "memory" is preserved
-            st["ema"] = beta * st["ema"] + (1.0 - beta) * float(metric)
-        """
+            # Minor change: reset plateau on improvement only
+            if delta < 0:
+                s["plateau_count"] = 0
+
+        # Apply LR change if any
+        if changed and not np.isclose(new_lr, lr):
+            s["lr"] = float(new_lr)
+            self.opt.learning_rate = float(new_lr)
+            print(f"  [lr] changed to {s['lr']:.6g} at iter {self.step}")
+
+        # Advance EMA prev
+        s["ema_prev"] = float(curr_ema)
+        return float(s["lr"])
 
     def _step_adam(self) -> None:
         """
@@ -1498,8 +1494,10 @@ class GPClassificationRunner:
         steps = [l.step for l in self.run_log.logs]
         nlml = [l.nlml for l in self.run_log.logs]
         ema = [l.ema for l in self.run_log.logs]
+
         ax1.plot(steps, nlml, linewidth=2, color="black", label="NLML")
-        ax1.plot(steps, ema, linewidth=1.5, color="grey", alpha=0.5, label="EMA")
+        if (np.array(ema) == None).all() == False:
+            ax1.plot(steps, ema, linewidth=1.5, color="grey", alpha=0.5, label="EMA")
         ax1.set_xlabel("Iteration")
         ax1.set_ylabel("Neg-ELBO")
         ax1.set_xlim(0, max(steps) if steps else self.maxiter)
@@ -2057,6 +2055,40 @@ class GPClassificationRunner:
             fig.savefig(self.run_dir / "03_calibration_curve.png", dpi=150)
             plt.close(fig)
 
+    def _plot_learning_rates(self) -> None:
+        """
+        Plot learning rate (Adam), natural gradient gamma
+        """
+        iters = range(1, len(self.run_log.logs) + 1)
+        lrs = [l.lr for l in self.run_log.logs]
+        gamms = [l.gamma for l in self.run_log.logs]
+
+        fig, ax1 = plt.subplots(figsize=(6, 4))
+        # Plot learning rate (left y-axis)
+        ax1.plot(iters, lrs, label="Adam LR", color="tab:blue")
+        ax1.set_xlabel("Iteration")
+        ax1.set_ylabel("Learning Rate", color="tab:blue")
+        ax1.tick_params(axis="y", labelcolor="tab:blue")
+
+        # Create a second axis for gamma
+        ax2 = ax1.twinx()
+        ax2.plot(iters, gamms, label="NatGrad gamma", color="tab:orange")
+        ax2.set_ylabel("Gamma", color="tab:orange")
+        ax2.tick_params(axis="y", labelcolor="tab:orange")
+
+        # Combine legends from all axes
+        lines, labels = [], []
+        # for ax in [ax1, ax2, ax3]:
+        for ax in [ax1, ax2]:
+            l, lab = ax.get_legend_handles_labels()
+            lines.extend(l)
+            labels.extend(lab)
+        ax1.legend(lines, labels, loc="upper right")
+
+        fig.tight_layout()
+        fig.savefig(self.run_dir / "04_learning_rates.png", dpi=150)
+        plt.close(fig)
+
     def _plot_kernel_scaling(self) -> None:
         """
         Plot kernel scaling hyperparameters: self.eta (float per iteration)
@@ -2089,7 +2121,7 @@ class GPClassificationRunner:
             if ax.get_legend_handles_labels()[0]:
                 ax.legend(ncol=2, fontsize=8)
             fig.tight_layout()
-            fig.savefig(self.run_dir / "04_kernel_parameters.png", dpi=150)
+            fig.savefig(self.run_dir / "05_kernel_parameters.png", dpi=150)
             plt.close(fig)
 
     def _plot_kernel_W(self) -> None:
@@ -2116,7 +2148,7 @@ class GPClassificationRunner:
             ax[k].set_ylabel(f"W[:,{k}]")
             ax[k].set_xlim(0, self.maxiter)
         fig.tight_layout()
-        fig.savefig(self.run_dir / "05_kernel_W.png", dpi=150)
+        fig.savefig(self.run_dir / "06_kernel_W.png", dpi=150)
         plt.close(fig)
 
     def _plot_kernel_eigs(self) -> None:
@@ -2229,7 +2261,7 @@ class GPClassificationRunner:
             )
 
         fig.tight_layout()
-        fig.savefig(self.run_dir / "06_kernel_eigs.png", dpi=150)
+        fig.savefig(self.run_dir / "07_kernel_eigs.png", dpi=150)
         plt.close(fig)
 
     def _retrieve_spatial_filter(self, f: int, iter: int) -> np.array:
@@ -2342,7 +2374,7 @@ class GPClassificationRunner:
                     axes[i].set_title(f"W[:,{label_idx}]  Iter {t}")
 
                 fig.tight_layout()
-                fig.savefig(self.run_dir / "07_topomaps.png", dpi=150)
+                fig.savefig(self.run_dir / "08_topomaps.png", dpi=150)
                 plt.close(fig)
 
         else:
@@ -2394,7 +2426,7 @@ class GPClassificationRunner:
                 if k == 0:
                     axes[k].set_title(f"{label[k]} (Iter {iter})", fontsize=9)
                 else:
-                    axes[k].set_title(f"{label[k]}")
+                    axes[k].set_title(f"{label[k]}", fontsize=9)
                 axes[k].set_xlabel(
                     f"Predicted P(y=1) > {self.pred_threshold}", fontsize=9
                 )
@@ -2403,7 +2435,7 @@ class GPClassificationRunner:
                     axes[k].text(j, i, int(v), ha="center", va="center", fontsize=9)
 
             fig.tight_layout()
-            fig.savefig(self.run_dir / "08_confusion_matrix.png", dpi=150)
+            fig.savefig(self.run_dir / "09_confusion_matrix.png", dpi=150)
             plt.close(fig)
 
     def _compute_feature(self, f: int, iter: int) -> Dict[str, np.ndarray]:
@@ -2581,6 +2613,9 @@ class GPClassificationRunner:
         """
         Scatter the selected feature pair for train / val / test and overlay the decision boundary
         Feature pair is read from `self.feature_pair` if present; otherwise defaults to (0, 1)
+
+        TODO: when more than 2 features are generated, the boundary decision projection to a pair's plane is bad
+
         """
         # Define iteration, if not provided use self._best_iter
         if iter is None:
@@ -2692,7 +2727,7 @@ class GPClassificationRunner:
             ax.set_title(f"Iter {iter}", fontsize=9)
             ax.legend(handles=handles, loc="best", fontsize=8, frameon=True)
             fig.tight_layout()
-            fig.savefig(self.run_dir / "09_features_and_boundary.png", dpi=150)
+            fig.savefig(self.run_dir / "10_features_and_boundary.png", dpi=150)
             plt.close(fig)
 
     def _get_posterior_q(self) -> Optional[Dict[str, Any]]:
@@ -2777,7 +2812,7 @@ class GPClassificationRunner:
         ax.set_ylabel("Latent mean ± 2σ")
         ax.set_title("VGP latent marginals")
         fig.tight_layout()
-        fig.savefig(self.run_dir / "10_vgp_latent_marginals.png", dpi=150)
+        fig.savefig(self.run_dir / "11_vgp_latent_marginals.png", dpi=150)
         plt.close(fig)
 
     def _plot_posterior_q_standardized(self) -> None:
@@ -2807,7 +2842,7 @@ class GPClassificationRunner:
         ax.set_ylabel("Density")
         ax.set_title("Posterior standardized latents")
         fig.tight_layout()
-        fig.savefig(self.run_dir / "11_posterior_q_standardized.png", dpi=150)
+        fig.savefig(self.run_dir / "12_posterior_q_standardized.png", dpi=150)
         plt.close(fig)
 
     def _plot_posterior_q_correlation_block(self, max_block: int = 64) -> None:
@@ -2847,7 +2882,7 @@ class GPClassificationRunner:
         ax.set_ylabel("Index")
         fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
         fig.tight_layout()
-        fig.savefig(self.run_dir / "12_posterior_q_correlation_block.png", dpi=150)
+        fig.savefig(self.run_dir / "13_posterior_q_correlation_block.png", dpi=150)
         plt.close(fig)
 
     def _plot_posterior_covariance_eigs(self) -> None:
@@ -2955,7 +2990,7 @@ class GPClassificationRunner:
             ax1.legend(lines1 + lines2, labels1 + labels2, loc="best", fontsize=8)
 
         fig.tight_layout()
-        fig.savefig(self.run_dir / "13_posterior_covariance_eigs.png", dpi=150)
+        fig.savefig(self.run_dir / "14_posterior_covariance_eigs.png", dpi=150)
         plt.close(fig)
 
     def _plot_uncertainty_vs_error(self) -> None:
@@ -2994,5 +3029,5 @@ class GPClassificationRunner:
         ax.set_title("Uncertainty vs. classification errors (train)")
         ax.legend(loc="best")
         fig.tight_layout()
-        fig.savefig(self.run_dir / "14_uncertainty_vs_error.png", dpi=150)
+        fig.savefig(self.run_dir / "15_uncertainty_vs_error.png", dpi=150)
         plt.close(fig)
