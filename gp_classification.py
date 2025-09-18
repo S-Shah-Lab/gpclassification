@@ -61,6 +61,7 @@ from typing import (
 
 
 # ---------------------- Third party libraries (mandatory) ----------------------
+import gpflow
 import matplotlib.pyplot as plt
 import numpy as np
 import tensorflow as tf
@@ -75,9 +76,9 @@ from sklearn.metrics import (
     average_precision_score,
 )
 from sklearn.model_selection import train_test_split
-import gpflow
 from scipy.interpolate import griddata
-
+from scipy.linalg import svd
+from scipy.sparse.linalg import svds
 from kernels import CustomKernel  # custom covariance function
 
 # ---------------------- Third party libraries (optionals for extra glitters) ----------------------
@@ -344,10 +345,6 @@ class GPClassificationRunner:
         self._create_config_file()  # Build config file for reproducibility
         self._load_and_prepare_data()  # X_train, X_val, X_test, Y_train, Y_val, Y_test, N_train, N_val, N_test, s
 
-        # if self.kfolds and self.kfolds > 1:
-        #    print(f"[CV] Running {self.kfolds}-fold on the train set")
-        #    self._kfold_cv_nlml()
-
         self._initialize_W_matrix()  # W_init
 
         # Define model by specifying kernel, likelihood, and method
@@ -385,7 +382,7 @@ class GPClassificationRunner:
         pairs = combinations(range(self.nf), 2)
         for pair in pairs:
             self.feature_pair = pair
-            self._plot_features_and_boundary()
+            self._plot_features_and_boundary()  # as of now this won't be pretty for nf > 2
 
         # Diagnostic on the variational parameters
         self._plot_vgp_latent_marginals()
@@ -393,6 +390,9 @@ class GPClassificationRunner:
         self._plot_posterior_q_correlation_block()
         self._plot_posterior_covariance_eigs()
         self._plot_uncertainty_vs_error()
+
+        self._plot_sv()
+        self._plot_sv_evolution()
 
         # TODO: plot decision boundary and features
 
@@ -680,6 +680,7 @@ class GPClassificationRunner:
                 return self.ch_names.index(name) if name in self.ch_names else None
 
             # Find indices of selected channels based on the provided list of channels
+            # good for right hand motor imagery
             left_id = [
                 i
                 for i in map(
@@ -688,6 +689,17 @@ class GPClassificationRunner:
                 )
                 if i is not None
             ]
+            # good for right foot motor imagery
+            right_id = [
+                i
+                for i in map(
+                    _idx_if_present,
+                    ["f1", "fz", "fc1", "fcz", "c1", "cz"],
+                )
+                if i is not None
+            ]
+            """
+            # good for left hand motor imagery
             right_id = [
                 i
                 for i in map(
@@ -696,6 +708,7 @@ class GPClassificationRunner:
                 )
                 if i is not None
             ]
+            """
             for idx in left_id:
                 if idx is not None and idx < self.s:
                     self.W_init[idx, 0] = (
@@ -829,7 +842,7 @@ class GPClassificationRunner:
                 int(0.05 * self.maxiter), 20
             ),  # number of steps allowed for repeated plateau behavior
             "cooldown": min(
-                int(0.05 * self.maxiter), 20
+                int(0.05 * self.maxiter), 35
             ),  # general counter to avoid instant reactions
             "tolerance": 1e-3,  # value used to define change in metric
             "best": 1e4,  # best metric value seen
@@ -963,7 +976,7 @@ class GPClassificationRunner:
         s.setdefault("growth_factor", 1.2)  # LR bump on big improvement
         s.setdefault("min_steps_between_growth", 40)
         s.setdefault("last_growth_step", -(10**9))
-        s.setdefault("cooldown_max", min(20, int(0.05 * self.maxiter)))
+        s.setdefault("cooldown_max", min(35, int(0.05 * self.maxiter)))
         s.setdefault("ema_prev", None)
 
         # Tick step and cooldown
@@ -1031,8 +1044,7 @@ class GPClassificationRunner:
         if abs(delta) <= tol:
             # Plateau logic, EMA didn't change significantly
             s["plateau_count"] += 1
-            # if s["plateau_count"] >= int(s["patience"]) and s.get("cooldown", 0) == 0:
-            if s["plateau_count"] >= int(s["patience"]):
+            if s["plateau_count"] >= int(s["patience"]) and s.get("cooldown", 0) == 0:
                 # Too many steps on plateau, no more patience, time to adapt LR with decay
                 new_lr = max(lr * float(s["decay_factor"]), float(s["min_lr"]))
                 s["plateau_count"] = 0  # reset count to 0
@@ -1053,9 +1065,9 @@ class GPClassificationRunner:
         elif delta <= -big_delta:
             # Negative jump, with EMA decreasing
             # Judge if enough step have passed between last LR bump, if so
-            can_grow = (s["step"] - s["last_growth_step"]) >= int(
-                s["min_steps_between_growth"]
-            )
+            can_grow = s.get("cooldown", 0) == 0 and (
+                s["step"] - s["last_growth_step"]
+            ) >= int(s["min_steps_between_growth"])
             if can_grow:
                 # Bump LR for faster convergence
                 new_lr = min(lr * float(s["growth_factor"]), float(s["max_lr"]))
@@ -1540,6 +1552,26 @@ class GPClassificationRunner:
             json.dump(asdict(self.run_log), f, indent=2)
 
     # ----------------- Visual Summary ----------------- #
+    def _get_split(self, name: str) -> Tuple:
+        """
+        Create tuple of (y, p) for a given split (train, val, test)
+        Both are set to None if val or test sets are missing
+        """
+        if name == "train":
+            y = self.Y_train.ravel().astype(int)
+            p = np.array(self.run_log.p_train_best)
+        elif name == "val":
+            if not getattr(self, "has_val", False):
+                return None, None
+            y = self.Y_val.ravel().astype(int)
+            p = np.array(self.run_log.p_val_best)
+        else:  # last case is "test"
+            if not getattr(self, "has_test", False):
+                return None, None
+            y = self.Y_test.ravel().astype(int)
+            p = np.array(self.run_log.p_test_best)
+        return y, p
+
     def _plot_learning_curves(self) -> None:
         """
         Plot curves used in training process (e.g. neg-elbo as nlml, nlpd_val, ...)
@@ -1963,124 +1995,85 @@ class GPClassificationRunner:
               e.g. all data in the first p bin should have P(y=1) -> 0, similarly all data data in the last p bin should have P(y=1) -> 1
                    additionally, all data in the p bin at 0.2 should have P(y=1) -> 0.2
         """
-        MIN_POINTS_PER_BIN = 3  # minimum samples per bin (otherwise looks for merging)
 
-        def _get_split(name: str) -> Tuple:
-            """
-            Create tuple of (y, p) for a given split (train, val, test)
-            Both are set to None if val or test sets are missing
-            """
-            if name == "train":
-                y = self.Y_train.ravel().astype(int)
-                p = np.array(self.run_log.p_train_best)
-            elif name == "val":
-                if not getattr(self, "has_val", False):
-                    return None, None
-                y = self.Y_val.ravel().astype(int)
-                p = np.array(self.run_log.p_val_best)
-            else:  # last case is "test"
-                if not getattr(self, "has_test", False):
-                    return None, None
-                y = self.Y_test.ravel().astype(int)
-                p = np.array(self.run_log.p_test_best)
-            return y, p
+        splits = {
+            "train": True,
+            "val": getattr(self, "has_val", False),
+            "test": getattr(self, "has_test", False),
+        }
+        curves = []
 
-        def _calibration_points(
-            y: np.ndarray, p: np.ndarray, initial_bins: int
-        ) -> Tuple:
-            """
-            Compute (mean_pred, frac_pos) after adaptively merging sparse bins to ajdacent bins
-            """
-            if p.size < MIN_POINTS_PER_BIN:
-                return None
+        for key, value in splits.items():
+            if value == False:
+                curves.append(None)
+            else:
+                # Extract labels and probabilities
+                y_true, p = self._get_split(key)
+                brier = brier_score_loss(y_true, p)  # Brier's score
 
-            # Equal-width initial bins as starting configuration
-            initial_bins = int(initial_bins)
-            edges = np.linspace(0.0, 1.0, initial_bins + 1)
+                # If too few test points, don't compute the plot
+                if p.size < 3:
+                    print(f"Not enough points for calibration curve: {p.size}")
 
-            # Assign each point to a bin index in [0, initial_bins-1]
-            # Since we provide edges in increasing order and `right==False` -> edges[i-1] <= x < edges[i]
-            idx = np.digitize(p, edges, right=False) - 1
-            idx[idx == initial_bins] = initial_bins - 1
+                # Start with `n_bins` equal-width bins in [0, 1]
+                initial_bins = int(n_bins)
+                edges = list(np.linspace(0.0, 1.0, initial_bins + 1))
 
-            # Distribute p among the bins to see bin population
-            bin_indices = [np.where(idx == b)[0].tolist() for b in range(initial_bins)]
+                # Assign each point to a bin index in [0, initial_bins-1]
+                # Since we provide edges in increasing order and `right==False` -> edges[i-1] <= x < edges[i]
+                idx = (
+                    np.digitize(p, edges, right=False) - 1
+                )  # Needs to shift by 1 to start index at 0
 
-            # Process the bins such that each one of them has enough samples, otherwise merge
-            # Merge into the neighbor (left/right) with fewer points; with ties always choose left bin
-            while True:
-                counts = [len(ix) for ix in bin_indices]
-                # condition for a single bin left or ideal scenario with all bins filled
-                if len(bin_indices) <= 1 or all(
-                    c >= MIN_POINTS_PER_BIN for c in counts
-                ):
-                    break
-                # first underfilled bin
-                b = next(i for i, c in enumerate(counts) if c < MIN_POINTS_PER_BIN)
-                left = b - 1 if b - 1 >= 0 else None
-                right = b + 1 if b + 1 < len(bin_indices) else None
-                if left is None and right is None:
-                    break  # single bin case
-                if left is None:
-                    bin_indices[right].extend(
-                        bin_indices[b]
-                    )  # merge current into right
-                    del bin_indices[b]  # get rid of old bin
-                elif right is None:
-                    bin_indices[left].extend(bin_indices[b])  # merge current into left
-                    del bin_indices[b]  # get rid of old bin
-                else:
-                    # choose neighbor with fewer points; with ties always choose left bin
-                    if counts[left] <= counts[right]:
+                # Distribute p among the bins to see bin population
+                bin_indices = [
+                    np.where(idx == b)[0].tolist() for b in range(int(n_bins))
+                ]
+
+                # Process the bins such that each one of them has enough samples, otherwise merge
+                # Merge into the neighbor (left/right) with fewer points; ties -> left
+                MIN_PER_BIN = 3
+                while True:
+                    counts = [len(ix) for ix in bin_indices]
+                    if len(bin_indices) == 1 or all(c >= MIN_PER_BIN for c in counts):
+                        break
+
+                    # pick first underfilled bin
+                    b = next(i for i, c in enumerate(counts) if c < MIN_PER_BIN)
+                    left = b - 1 if b - 1 >= 0 else None
+                    right = b + 1 if b + 1 < len(bin_indices) else None
+
+                    if left is None and right is None:
+                        # single bin case
+                        break
+                    elif left is None:
+                        # merge current into right
+                        bin_indices[right].extend(bin_indices[b])
+                        del bin_indices[b]
+                    elif right is None:
+                        # merge current into left
                         bin_indices[left].extend(bin_indices[b])
                         del bin_indices[b]
                     else:
-                        # merge right into current b (keeps order stable)
-                        bin_indices[b].extend(bin_indices[right])
-                        del bin_indices[right]
+                        # choose neighbor with fewer points; tie -> left
+                        if counts[left] <= counts[right]:
+                            bin_indices[left].extend(bin_indices[b])
+                            del bin_indices[b]
+                        else:
+                            bin_indices[b].extend(bin_indices[right])
+                            del bin_indices[right]
 
-            # Compute mean predicted probabilities (x values) and empirical fraction (y values)
-            mean_pred, frac_pos = [], []
-            for ix in bin_indices:
-                if not ix:  # safety
-                    continue
-                ix = np.asarray(ix, dtype=int)
-                mean_pred.append(float(p[ix].mean()))
-                frac_pos.append(float((y[ix] == 1).mean()))
+                # Compute empirical fraction (y values) and mean predicted probabilities (x values)
+                frac_pos, mean_pred = [], []
+                for ix in bin_indices:
+                    if not ix:  # safety
+                        continue
+                    frac_pos.append(float((y_true[ix] == 1).mean()))
+                    mean_pred.append(float(p[ix].mean()))
 
-            if not mean_pred:
-                return None
-            return np.array(mean_pred), np.array(frac_pos)
+                curves.append([key, mean_pred, frac_pos, brier])
 
-        # Collect available splits
-        splits = [
-            ("train", True),
-            ("val", getattr(self, "has_val", False)),
-            ("test", getattr(self, "has_test", False)),
-        ]
-        curves = []  # (name, mean_pred, frac_pos, brier)
-
-        for name, available in splits:
-            if not available and name != "train":
-                continue
-            y, p = _get_split(name)
-            if y is None or p is None:
-                print(f"Skipping {name}: no usable labels/probabilities")
-                continue
-
-            pts = _calibration_points(y, p, n_bins)
-            if pts is None:
-                print(
-                    f"Skipping {name}: insufficient points after binning (n={p.size})"
-                )
-                continue
-            mean_pred, frac_pos = pts
-            brier = brier_score_loss(y, p)
-            curves.append((name, mean_pred, frac_pos, brier))
-
-        if not curves:
-            print("No eligible splits for calibration curve")
-            return None
+        return curves
 
     def _plot_calibration_curves(self) -> None:
         """
@@ -2090,31 +2083,35 @@ class GPClassificationRunner:
 
         curves = self._generate_calibration_curves()
 
-        if curves is not None:
-            fig, ax = plt.subplots(figsize=(5.6, 5.6))
-            ax.plot(
-                [0, 1], [0, 1], linestyle=":", linewidth=2, label="Perfectly calibrated"
-            )
-
-            markers = {"train": "o", "val": "s", "test": "^"}
-            for name, mean_pred, frac_pos, brier in curves:
+        fig, ax = plt.subplots(figsize=(5.6, 5.6))
+        ax.plot(
+            [0, 1],
+            [0, 1],
+            linestyle=":",
+            linewidth=2,
+            color="black",
+            label="Perfectly calibrated",
+        )
+        markers = {"train": "o", "val": "s", "test": "^"}
+        for curve in curves:
+            if curve is not None:
+                name, mean_pred, frac_pos, brier = curve
                 ax.plot(
                     mean_pred,
                     frac_pos,
                     marker=markers.get(name, "o"),
                     linewidth=1.5,
                     color=self.colors[name],
-                    label=f"{name.capitalize()} (Brier={brier:.3f})",
+                    label=f"{name} (Brier={brier:.3f})",
                 )
-
-            ax.set_xlabel("Predicted probability")
-            ax.set_ylabel("Empirical probability")
-            ax.set_title("Calibration curves")
-            # ax.grid(alpha=0.3)
-            ax.legend(loc="best")
-            fig.tight_layout()
-            fig.savefig(self.run_dir / "03_calibration_curve.png", dpi=150)
-            plt.close(fig)
+        ax.set_xlabel("Predicted probability")
+        ax.set_ylabel("Empirical probability")
+        ax.set_title("Calibration curves")
+        # ax.grid(alpha=0.3)
+        ax.legend(loc="best")
+        fig.tight_layout()
+        fig.savefig(self.run_dir / "03_calibration_curve.png", dpi=150)
+        plt.close(fig)
 
     def _plot_learning_rates(self) -> None:
         """
@@ -2788,7 +2785,10 @@ class GPClassificationRunner:
             ax.set_title(f"Iter {iter}", fontsize=9)
             ax.legend(handles=handles, loc="best", fontsize=8, frameon=True)
             fig.tight_layout()
-            fig.savefig(self.run_dir / "10_features_and_boundary.png", dpi=150)
+            fig.savefig(
+                self.run_dir / f"10_features_and_boundary_{self.feature_pair}.png",
+                dpi=150,
+            )
             plt.close(fig)
 
     def _get_posterior_q(self) -> Optional[Dict[str, Any]]:
@@ -2952,6 +2952,8 @@ class GPClassificationRunner:
         For diagonal forms, this reduces to sorted variances
         For full forms, uses a subset for stability
 
+        The rank at 99% cumulative sum show the number of dimensions needed to explain the variance in the dataset
+
         Note: Eigenvalues of S tell you effective dimensionality of the posterior variability
               Compute condition number, effective rank at 95-99%, and cumulative energy
               If rank collapses to 1, the kernel is pretending the world is a straight line
@@ -3091,4 +3093,132 @@ class GPClassificationRunner:
         ax.legend(loc="best")
         fig.tight_layout()
         fig.savefig(self.run_dir / "15_uncertainty_vs_error.png", dpi=150)
+        plt.close(fig)
+
+    def _compute_features_matrix(self, iter: int) -> np.ndarray:
+        """
+        Generate a matrix of features per spatial filter at a given `iter` iteration
+        The resulting matrix is gonna have shape (self.N_train, self.nf)
+        """
+        mat = np.zeros((self.N_train, self.nf))
+
+        for f in range(int(self.nf)):
+            # dict of features a `iter` for a given filter index `f`
+            feats = self._compute_feature(f=f, iter=iter)
+            mat[:, f] = feats["train"]
+
+        return mat
+
+    def _compute_svd(self, mat: np.ndarray, k: Optional[int] = None) -> np.array:
+        """
+        Perform SVD on a given matrix `mat`, with `k` being the number of largest eigenvalues to consider
+        `k` = None uses full rank
+        """
+        try:
+            if k is None:
+                # Full SVD; use 'gesvd' under the hood
+                # with `mat` of shape (M, N) `full_matrices` being True means U and Vh are of shape (M, M), (N, N)
+                # being False, the shapes are (M, K) and (K, N), where K = min(M, N)
+                s = svd(mat, full_matrices=True, compute_uv=False)
+            else:
+                # Top-k eigenvalues via Lanczos
+                # This is best for large/sparse matrices, requires flip ascending order
+                s = np.sort(svds(mat, k=k, return_singular_vectors=False))
+            return s
+        except:
+            return None
+
+    def _plot_sv(self, iter: Optional[int] = None) -> None:
+        """
+        Plot singular values at a given `iter` iteration
+        The idea is to find out the rank of meaningful dimension in the feature space at a given iteration
+        """
+        if iter is None:
+            # Use `best` iteration
+            iter = self._best_iter
+            self._plot_sv(iter=iter)
+        else:
+            mat = self._compute_features_matrix(iter=iter)
+            s = self._compute_svd(mat)  # full dimension
+            s = np.sort(s)[::-1]  # sort descending for nicer visual
+            xs = np.arange(1, len(s) + 1)
+
+            # Plot
+            fig, ax = plt.subplots(figsize=(7, 4.5))
+            ax.plot(
+                xs,
+                s,
+                marker="o",
+                color="black",
+                markerfacecolor="gold",
+                markeredgecolor="black",
+                linewidth=1.5,
+            )
+            ax.set_xlim(np.min(xs) - 0.5, np.max(xs) + 0.5)
+            ax.set_ylabel("Singular value")
+            ax.set_xlabel("Index")
+            ttl = f"Iter {iter}"
+            ax.set_title(ttl, fontsize=9)
+            # ax.grid(True, linestyle="--", alpha=0.4)
+            fig.tight_layout()
+            fig.savefig(self.run_dir / "16_singular_values.png", dpi=150)
+            plt.close(fig)
+
+    def _plot_sv_evolution(self) -> None:
+        """
+        Plot singular values over the iterations in a raster plot-like visualization
+        A box over the plot highlights the `best` iteration
+        """
+
+        mat_iter = np.zeros((self.nf, self.maxiter))
+
+        for iter in range(int(self.maxiter)):
+            mat = self._compute_features_matrix(iter=iter)
+            try:
+                s = self._compute_svd(mat)  # full dimension
+                s = np.sort(s)[::-1]  # sort descending for nicer visual
+            except:
+                s = np.array([np.nan] * self.nf)
+            mat_iter[:, iter] = s
+
+        fig, ax = plt.subplots(figsize=(7, 4.5))
+        im = ax.imshow(
+            mat_iter,
+            aspect="auto",
+            origin="lower",
+            interpolation="nearest",
+            cmap="plasma",
+        )
+        cbar = plt.colorbar(im, ax=ax, vmin=0)
+        ax.set_xlabel("Iter")
+        ax.set_ylabel("Singular values")
+        Lylim = self.nf - 0.5
+        ax.set_xlim(-0.5, self.maxiter - 0.5)
+        ax.set_ylim(-0.5, Lylim)
+        # Box around best column
+        from matplotlib.patches import Rectangle
+
+        rect = Rectangle(
+            (self._best_iter - 0.5, -0.5),
+            1.0,
+            self.nf,
+            fill=False,
+            linewidth=2.0,
+            edgecolor="red",
+        )
+        ax.add_patch(rect)
+        # Arrow + label
+        ax.annotate(
+            f"best @ iter {self._best_iter}",
+            xy=(self._best_iter, self.nf + 0.1),
+            xytext=(self._best_iter, self.nf + 0.8),
+            ha="center",
+            arrowprops=dict(arrowstyle="->", lw=1.5, color="red"),
+            color="red",
+            fontsize=9,
+        )
+
+        ax.grid(False)
+        fig.tight_layout()
+        fig.savefig(self.run_dir / "17_singular_values_raster.png", dpi=150)
         plt.close(fig)
