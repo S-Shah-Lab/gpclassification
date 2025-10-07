@@ -205,7 +205,7 @@ class GPClassificationRunner:
         ch_names: List[str],  # names of EEG channels
         ch_xy: Dict[str, Tuple[float, float]],  # coordinates of EEG channels
         # Model / kernel
-        spatialFilter_init: str = "random",  # 'random' | 'ones' | 'manual'
+        spatialFilter_init: str = "random",  # 'random' | 'ones' | 'focused'
         nf: int = 2,  # number of spatial filter cols
         eta_flag: bool = False,
         ard_flag: bool = False,
@@ -226,20 +226,12 @@ class GPClassificationRunner:
         pred_threshold: float = 0.5,  # decision boundary in binary classification p(y=1) >= pred_threshold
         random_state: int = 42,
         # ----- New data split controls (only for array inputs)
-        frac_val: float = 0.5,
-        frac_test: float = 0.5,
+        frac_val: float = 0.2,
+        frac_test: float = 0.2,
         # ----- Policy flags for adaptation / early stopping
         use_validation_for_adaptation: bool = False,  # if True and val exists, adapt LR/ES on val; else train-only
-        enable_adaptation: bool = False,  # enable LR reduce-on-plateau on chosen set
+        enable_adaptation: bool = True,  # enable LR reduce-on-plateau on chosen set
         enable_early_stopping: bool = False,  # enable early stopping on chosen set
-        # ----- K-fold CV on training set
-        kfolds: int = 0,  # 0 disables; >1 runs CV on training set and plots NLML bands
-        # GIF controls
-        gif_flag: bool = True,  # generate GIFs
-        gif_stride: int = 20,  # sample every k iterations
-        gif_max_frames: int = 50,  # auto-raise stride to cap frames
-        synced_gif: bool = True,  # generate synced dashboard GIF
-        topomap_filters_for_gif: int = 2,  # animate first k cols of W
         # Run naming / Logging
         results_dir: str = "./results",
         run_name: Optional[str] = None,
@@ -283,14 +275,6 @@ class GPClassificationRunner:
         self.use_validation_for_adaptation = bool(use_validation_for_adaptation)
         self.enable_adaptation = bool(enable_adaptation)
         self.enable_early_stopping = bool(enable_early_stopping)
-        self.kfolds = int(kfolds)
-
-        # Store GIF config
-        self.gif_flag = gif_flag
-        self.gif_stride = max(1, int(gif_stride))
-        self.gif_max_frames = gif_max_frames
-        self.synced_gif = synced_gif
-        self.topomap_filters_for_gif = max(1, int(topomap_filters_for_gif))
 
         # Store Run naming / Logging
         self.results_root = Path(results_dir)
@@ -374,15 +358,18 @@ class GPClassificationRunner:
         self._plot_learning_rates()
         self._plot_kernel_scaling()
         self._plot_kernel_W()
-        self._plot_kernel_eigs()  # diagnostic for Grahm matrix
+        self._plot_kernel_eigs()  # diagnostic for Grahm matrix / if `eigs_bool` flag is False, no plot will be shown
         self._plot_topomap()
 
         self._plot_confusion_matrix()
 
         pairs = combinations(range(self.nf), 2)
-        for pair in pairs:
-            self.feature_pair = pair
-            self._plot_features_and_boundary()  # as of now this won't be pretty for nf > 2
+        if self.nf == 2:
+            for pair in pairs:
+                self.feature_pair = pair
+                self._plot_features_and_boundary()  # as of now this won't be pretty for nf > 2
+        else:
+            pass
 
         # Diagnostic on the variational parameters
         self._plot_vgp_latent_marginals()
@@ -392,7 +379,7 @@ class GPClassificationRunner:
         self._plot_uncertainty_vs_error()
 
         self._plot_sv()
-        self._plot_sv_evolution()
+        # self._plot_sv_evolution() # this is very time consuming if `self.maxiter` >> 1
 
         # TODO: plot decision boundary and features
 
@@ -430,7 +417,11 @@ class GPClassificationRunner:
             "data_input_mode": "dict" if isinstance(self.X, dict) else "array",
             "#channels": len(self.ch_names),
             # Model
-            "spatialFilter_init": self.spatialFilter_init,
+            "spatialFilter_init": (
+                {"type": "array", "shape": list(self.spatialFilter_init.shape)}
+                if isinstance(self.spatialFilter_init, np.ndarray)
+                else self.spatialFilter_init
+            ),
             "nf": self.nf,
             "eta_flag": self.eta_flag,
             "ard_flag": self.ard_flag,
@@ -451,13 +442,6 @@ class GPClassificationRunner:
             "use_validation_for_adaptation": self.use_validation_for_adaptation,
             "enable_adaptation": self.enable_adaptation,
             "enable_early_stopping": self.enable_early_stopping,
-            "kfolds": self.kfolds,
-            # GIF controls
-            "gif_flag": self.gif_flag,
-            "gif_stride": self.gif_stride,
-            "gif_max_frames": self.gif_max_frames,
-            "synced_gif": self.synced_gif,
-            "topomap_filters_for_gif": self.topomap_filters_for_gif,
         }
 
     def _write_config_file(self) -> None:
@@ -612,19 +596,20 @@ class GPClassificationRunner:
             return
 
         # Case 2: array-like inputs
-        # Split by frac_val/frac_test if > 0; otherwise use everything as train.
+        # Split data into train / validation / test sets using `random_seed`
+        # This is done by checking the passed fractions `frac_val` and `frac_test`
         else:
             self.s = self.X.shape[-1]
             X_all = _flatten_3d_to_2d(self.X)  # shape (N, s*s)
             Y_all = _to_col(self.Y)  # shape (N, 1)
 
-            # All data is used for train
             if frac_val == 0.0 and frac_test == 0.0:
+                # All data is used for train
                 _set_attrs(X_all, Y_all, None, None, None, None)
                 return
 
-            # Split out test first if frac_test exists, then val from remaining data
             if frac_test > 0.0:
+                # Split out test first if `frac_test` exists, then val from remaining data
                 X_tmp, X_te, Y_tmp, Y_te = train_test_split(
                     X_all,
                     Y_all,
@@ -633,9 +618,11 @@ class GPClassificationRunner:
                     shuffle=True,
                 )
             else:
+                # No test set, all data becomes temporary
                 X_tmp, Y_tmp, X_te, Y_te = X_all, Y_all, None, None
 
             if frac_val > 0.0:
+                # Split the temporary set into train and val
                 X_tr, X_va, Y_tr, Y_va = train_test_split(
                     X_tmp,
                     Y_tmp,
@@ -644,6 +631,7 @@ class GPClassificationRunner:
                     shuffle=True,
                 )
             else:
+                # No validation set, temporary set is all train
                 X_tr, Y_tr, X_va, Y_va = X_tmp, Y_tmp, None, None
 
             # Final assignment
@@ -653,87 +641,112 @@ class GPClassificationRunner:
     def _initialize_W_matrix(self) -> None:
         """
         Initilize the spatial filter matrix W according to the provided configuration as self.W_init : (s, nf)
+        Accepts either:
+            - a string policy ("random" | "ones" | "focused")  -> trainable W
+            - a NumPy array of shape (s, nf)                   -> NON-trainable W (fixed)
         """
         rng = np.random.default_rng(self.random_state)  # Define random state
 
+        # Different `self.spatialFilter_init` allow for different behaviors
+        # When a matrix is provided in input the W matrix is kept fixed and training iterations don't change it
+        if isinstance(self.spatialFilter_init, np.ndarray):
+            W_arr = np.asarray(self.spatialFilter_init, dtype=np.float64)
+            if W_arr.ndim != 2:
+                raise ValueError("spatialFilter_init array must be 2D with shape (s, nf)")
+            if W_arr.shape[0] != self.s:
+                raise ValueError(f"spatialFilter_init has {W_arr.shape[0]} rows, expected s={self.s}")
+            if W_arr.shape[1] != self.nf:
+                raise ValueError(f"spatialFilter_init has {W_arr.shape[1]} cols, expected nf={self.nf}")
+            self.W_init = W_arr.copy()
+            self.W_trainable = False
+
+        # When a string is provided in input the W matrix is initialized according to one of the following methods and is allowed to be trained
         # Initialize W according to flag
-        if self.spatialFilter_init == "random":
-            # Randomize initial coefficients using Gaussian -> N(0, 0.1)
-            self.W_init = rng.normal(loc=0.0, scale=0.1, size=(self.s, self.nf))
-
-        elif self.spatialFilter_init == "ones":
-            # Set all initial coefficients to 1
-            self.W_init = np.ones((self.s, self.nf), dtype=np.float64)
-
-        elif self.spatialFilter_init == "manual":
-            # Custom configuration for initial coefficients
-            # All set to 0 except channels commonly involved in motor command following
-            self.W_init = np.zeros((self.s, self.nf))
-
-            if self.nf > 2:
-                print(
-                    f"Warning: More than 2 spatial filters initialized, `manual` currenlty needs fixing!"
-                )
-
-            # Heuristic motor indices (best-effort), set the weights corresponding to those channels to 1
-            def _idx_if_present(name: str) -> Optional[int]:
-                return self.ch_names.index(name) if name in self.ch_names else None
-
-            # Find indices of selected channels based on the provided list of channels
-            # good for right hand motor imagery
-            left_id = [
-                i
-                for i in map(
-                    _idx_if_present,
-                    ["fc1", "c1", "cp1", "fc3", "c3", "fc5", "c5", "cp5"],
-                )
-                if i is not None
-            ]
-            # good for right foot motor imagery
-            right_id = [
-                i
-                for i in map(
-                    _idx_if_present,
-                    ["f1", "fz", "fc1", "fcz", "c1", "cz"],
-                )
-                if i is not None
-            ]
-            """
-            # good for left hand motor imagery
-            right_id = [
-                i
-                for i in map(
-                    _idx_if_present,
-                    ["fc2", "c2", "cp2", "fc4", "c4", "fc6", "c6", "cp6"],
-                )
-                if i is not None
-            ]
-            """
-            for idx in left_id:
-                if idx is not None and idx < self.s:
-                    self.W_init[idx, 0] = (
-                        1  # Set first col for left hemisphere channels --> Move right
-                    )
-            if self.nf > 1:
-                for idx in right_id:
-                    if idx is not None and idx < self.s:
-                        self.W_init[idx, 1] = (
-                            1  # Set second col for right hemisphere channels --> Move left
-                        )
         else:
-            raise ValueError(f"Unknown spatialFilter_init: {self.spatialFilter_init}")
+            self.W_trainable = True
+            
+            if self.spatialFilter_init == "random":
+                # Randomize initial coefficients using Gaussian -> N(0, 0.1)
+                self.W_init = rng.normal(loc=0.0, scale=1, size=(self.s, self.nf))
+
+            elif self.spatialFilter_init == "ones":
+                # Set all initial coefficients to 1
+                self.W_init = np.ones((self.s, self.nf), dtype=np.float64)
+
+            elif self.spatialFilter_init == "focused":
+                # Custom configuration for initial coefficients
+                # All set to 0 except channels commonly involved in motor command following
+                self.W_init = np.zeros((self.s, self.nf))
+
+                if self.nf > 2:
+                    print(
+                        f"Warning: More than 2 spatial filters initialized, `focused` currenlty needs fixing!"
+                    )
+
+                # Heuristic motor indices (best-effort), set the weights corresponding to those channels to 1
+                def _idx_if_present(name: str) -> Optional[int]:
+                    return self.ch_names.index(name) if name in self.ch_names else None
+
+                # Find indices of selected channels based on the provided list of channels
+                # good for right hand motor imagery
+                left_id = [
+                    i
+                    for i in map(
+                        _idx_if_present,
+                        ["fc1", "c1", "cp1", "fc3", "c3", "fc5", "c5", "cp5"],
+                    )
+                    if i is not None
+                ]
+                # good for right foot motor imagery
+                right_id = [
+                    i
+                    for i in map(
+                        _idx_if_present,
+                        ["f1", "fz", "fc1", "fcz", "c1", "cz"],
+                    )
+                    if i is not None
+                ]
+                """
+                # good for left hand motor imagery
+                right_id = [
+                    i
+                    for i in map(
+                        _idx_if_present,
+                        ["fc2", "c2", "cp2", "fc4", "c4", "fc6", "c6", "cp6"],
+                    )
+                    if i is not None
+                ]
+                """
+                for idx in left_id:
+                    if idx is not None and idx < self.s:
+                        self.W_init[idx, 0] = (
+                            1  # Set first col for left hemisphere channels --> Move right
+                        )
+                if self.nf > 1:
+                    for idx in right_id:
+                        if idx is not None and idx < self.s:
+                            self.W_init[idx, 1] = (
+                                1  # Set second col for right hemisphere channels --> Move left
+                            )
+            else:
+                raise ValueError(f"Unknown spatialFilter_init: {self.spatialFilter_init}")
 
         # Update config file
-        self.cfg.update({"W_init_shape": self.W_init.shape})
+        self.cfg.update({
+            "W_init_shape": self.W_init.shape,
+            "W_trainable": bool(getattr(self, "W_trainable", True)),
+            "W_source": "array" if isinstance(self.spatialFilter_init, np.ndarray) else str(self.spatialFilter_init),
+        })
 
     # ----------------- Model / Kernel builders ----------------- #
-    def _build_kernel(self) -> gpflow.kernels.Kernel:
+    def _build_kernel(self) -> None:
         """
         Build a GPflow kernel to pass to the model
         """
         # Initialize the kernel using the provided CustomKernel
         self.kernel = CustomKernel(
             self.W_init,
+            W_trainable=self.W_trainable,
             ard_flag=self.ard_flag,
             eta_flag=self.eta_flag,
             logged_flag=self.logged_flag,
@@ -741,7 +754,7 @@ class GPClassificationRunner:
         )
         return
 
-    def _build_likelihood(self) -> gpflow.likelihoods.Likelihood:
+    def _build_likelihood(self) -> None:
         """
         Build a GPflow likelihood to pass to the model
         """
@@ -753,7 +766,7 @@ class GPClassificationRunner:
         self.likelihood = self.likelihood_class(**self.likelihood_kwargs)
         return
 
-    def _build_model(self) -> gpflow.models.Model:
+    def _build_model(self) -> None:
         """
         Build a GPflow model with chosen kernel, likelihood, and method
         """
@@ -1252,7 +1265,7 @@ class GPClassificationRunner:
 
         return metrics
 
-    def _snapshot_kernel(self) -> Dict[str, Optional[Any]]:
+    def _snapshot_kernel(self, eigs_bool: bool = False) -> Dict[str, Optional[Any]]:
         """
         Grab kernel parameters
         """
@@ -1297,18 +1310,21 @@ class GPClassificationRunner:
                 ard = None
 
             # Optional eigenvalues of Gram on a small subset
-            try:
-                Xg = self.X_train if self.X_train is not None else None
-                if Xg is not None:
-                    # Could use reduce dim to keep it light
-                    # m = min(64, Xg.shape[0])
-                    # Otherwise full rank
-                    m = Xg.shape[0]
-                    K = self.kernel.K(
-                        tf.convert_to_tensor(Xg[:m], dtype=tf.float64)
-                    ).numpy()
-                    eigs = np.maximum(np.linalg.eigvalsh(K), 0.0).tolist()
-            except Exception:
+            if eigs_bool:
+                try:
+                    Xg = self.X_train if self.X_train is not None else None
+                    if Xg is not None:
+                        # Could use reduce dim to keep it light
+                        # m = min(64, Xg.shape[0])
+                        # Otherwise full rank
+                        m = Xg.shape[0]
+                        K = self.kernel.K(
+                            tf.convert_to_tensor(Xg[:m], dtype=tf.float64)
+                        ).numpy()
+                        eigs = np.maximum(np.linalg.eigvalsh(K), 0.0).tolist()
+                except Exception:
+                    eigs = None
+            else:
                 eigs = None
 
         return {"W": W, "eta": eta, "ard": ard, "eigs": eigs}

@@ -1,13 +1,14 @@
 import gpflow
 import tensorflow as tf
 import numpy as np
-from gpflow.utilities import positive
+from gpflow.utilities import positive, to_default_float
 
 
 class CustomKernel(gpflow.kernels.Kernel):
     def __init__(
         self,
         W: np.ndarray,
+        W_trainable: bool = True,
         ard_flag: bool = True,
         eta_flag: bool = True,
         logged_flag: bool = True,
@@ -16,6 +17,7 @@ class CustomKernel(gpflow.kernels.Kernel):
         """
         Custom GPflow kernel operating on covariance matrices with spatial filtering
             W: Spatial filter matrix of shape [s, nf]
+            W_trainable: if False, keep W fixed during training
             ard_flag: Use ARD scaling per feature
             eta_flag: Use a global scaling
             logged_flag: log-transform features
@@ -36,22 +38,22 @@ class CustomKernel(gpflow.kernels.Kernel):
         # GPflow parameter
         # Spatial filter matrix
         # W has shape [s, nf], and its p column is called w
-        self.W = gpflow.Parameter(W, trainable=True)
+        self.W = gpflow.Parameter(W, trainable=W_trainable)
 
         # Automatic Relevance Detection (ARD) determines scaling of each feature independently
         # Initialize parameter at 1.0, allows constrained representation forcing it to be positive
-        # This parameter is unique
-        self.eta = (
-            gpflow.Parameter(1.0, transform=positive()) if self._flag_eta else None
-        )
-
-        # Global variance parameter determines global scaling
-        # Initialize parameter at 10, allows constrained representation forcing it to be positive
         # This is a parameter for each filter of the spatial filter matrix, nf parameters in total
         self.ard = (
             gpflow.Parameter(np.ones(self.nf), transform=positive())
             if self._flag_ard
             else None
+        )
+
+        # Global variance parameter determines global scaling
+        # Initialize parameter at 10, allows constrained representation forcing it to be positive
+        # This parameter is unique
+        self.eta = (
+            gpflow.Parameter(1.0, transform=positive()) if self._flag_eta else None
         )
 
     @property
@@ -83,6 +85,11 @@ class CustomKernel(gpflow.kernels.Kernel):
         # The assumption is: tf.shape(Sigma) = [N, s, s]
         #   N: number of trials
         #   s: number of sensors
+
+        # Ensure dtype consistency with GPflow default float and params
+        Sigma = to_default_float(Sigma)
+        if Sigma.dtype != self.W.dtype:
+            Sigma = tf.cast(Sigma, self.W.dtype)
 
         # Applies Σi @ w for each i with i being trial number
         # This step performs the operation for each spatial filter column of index p
