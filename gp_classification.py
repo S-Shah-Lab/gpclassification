@@ -72,7 +72,6 @@ from sklearn.metrics import (
     roc_curve,
     roc_auc_score,
     precision_recall_curve,
-    auc,
     average_precision_score,
 )
 from sklearn.model_selection import train_test_split
@@ -110,35 +109,34 @@ class IterLog:
     Per-iteration logging
     """
 
-    step: int
+    step:         int
     # Train set
-    nlml: float  # negative log marginal likelihood
-    nlpd_train: Optional[float]  # negative log probability density
-    acc_train: Optional[float]  # accuracy
-    brier_train: Optional[float]  # brier's score
+    nlml:         float  # negative log marginal likelihood
+    nlpd_train:   Optional[float]  # negative log probability density
+    acc_train:    Optional[float]  # accuracy
+    brier_train:  Optional[float]  # brier's score
     aucroc_train: Optional[float]  # area under the curve ROC
-    aucpr_train: Optional[float]  # area under the curve precision-recall
+    aucpr_train:  Optional[float]  # area under the curve precision-recall
     # Validation set
-    nlpd_val: Optional[float]
-    acc_val: Optional[float]
-    brier_val: Optional[float]
-    aucroc_val: Optional[float]
-    aucpr_val: Optional[float]
+    nlpd_val:     Optional[float]
+    acc_val:      Optional[float]
+    brier_val:    Optional[float]
+    aucroc_val:   Optional[float]
+    aucpr_val:    Optional[float]
     # Test set
-    nlpd_test: Optional[float]
-    acc_test: Optional[float]
-    brier_test: Optional[float]
-    aucroc_test: Optional[float]
-    aucpr_test: Optional[float]
+    nlpd_test:    Optional[float]
+    acc_test:     Optional[float]
+    brier_test:   Optional[float]
+    aucroc_test:  Optional[float]
+    aucpr_test:   Optional[float]
     # Kernel
-    W: List[List[float]]  # spatial filter weights
-    eta: Optional[float]  # global scaling
-    ard: Optional[List[float]]  # per-filter scaling
-    kernel_eigs: Optional[List[float]]  # kernel eigenvalues
+    W:            List[List[float]]  # spatial filter weights
+    eta:          Optional[float]  # global scaling
+    ard:          Optional[List[float]]  # per-filter scaling
     # Training process
-    lr: List[float]  # Adam learning rate
-    ema: List[float]  # Exponential moving average of training metric
-    gamma: List[float]  # Natural gradient gamma
+    lr:           List[float]  # Adam learning rate
+    ema:          List[float]  # Exponential moving average of training metric
+    gamma:        List[float]  # Natural gradient gamma
 
 
 @dataclass
@@ -147,24 +145,29 @@ class RunLog:
     Container for the entire run logs, converted to JSON format
     """
 
-    meta: Dict[str, Any]  # config
-    logs: List[IterLog]  # per-iteration logged info
+    meta:          Dict[str, Any]     # config information
+    logs:          List[IterLog]      # per-iteration metrics, learning rates, kernel parameters
     # Train set
-    p_train_seq: List[List[float]]  # predicted probabilties (one list per iteration)
-    p_train_best: List[float]  # predicted probabilities (last iteration only)
-    y_train_seq: List[List[int]]  # label sequences (one list per iteration)
-    y_train_best: List[int]  # label sequences (one list per iteration)
+    #p_train_seq:  List[List[float]]  # predicted probabilties (one list per iteration)
+    #p_train_best: List[float]        # predicted probabilities (last iteration only)
+    #y_train_seq:  List[List[int]]    # label sequences (one list per iteration)
+    #y_train_best: List[int]          # label sequences (one list per iteration)
     # Validation set
-    p_val_seq: List[List[float]]
-    p_val_best: List[float]
-    y_val_seq: List[List[int]]
-    y_val_best: List[int]
+    #p_val_seq:    List[List[float]]
+    #p_val_best:   List[float]
+    #y_val_seq:    List[List[int]]
+    #y_val_best:   List[int]
     # Test set
-    p_test_seq: List[List[float]]
-    p_test_best: List[float]
-    y_test_seq: List[List[int]]
-    y_test_best: List[int]
-
+    #p_test_seq:   List[List[float]]
+    #p_test_best:  List[float]
+    #y_test_seq:   List[List[int]]
+    #y_test_best:  List[int]
+    p_train_best:  List[float]        # Train set
+    y_train_best:  List[int]
+    p_val_best:    List[float]        # Validation set
+    y_val_best:    List[int]
+    p_test_best:   List[float]        # Test set
+    y_test_best:   List[int]
 
 # -------------------------- Utility helpers --------------------------
 def _ensure_dir(p: Path) -> None:
@@ -202,11 +205,11 @@ class GPClassificationRunner:
         X: ArrayOrDict,
         Y: ArrayOrDict,
         dataset_label: str,
-        ch_names: List[str],  # names of EEG channels
-        ch_xy: Dict[str, Tuple[float, float]],  # coordinates of EEG channels
+        ch_names: List[str],                   # Names of EEG channels
+        ch_xy: Dict[str, Tuple[float, float]], # Coordinates of EEG channels
         # Model / kernel
-        spatialFilter_init: str = "random",  # 'random' | 'ones' | 'focused'
-        nf: int = 2,  # number of spatial filter cols
+        spatialFilter_init: str = "random",    # 'random' | 'ones' | 'focused'
+        nf: int = 2,                           # Number of spatial filter cols
         eta_flag: bool = False,
         ard_flag: bool = False,
         logged_flag: bool = True,
@@ -221,17 +224,17 @@ class GPClassificationRunner:
         ] = None,
         # Training
         learning_rate: float = 0.01,  # Adam default learning rate
-        gamma: float = 0.1,  # Natural gradient default learning rate
-        maxiter: int = 1000,
-        pred_threshold: float = 0.5,  # decision boundary in binary classification p(y=1) >= pred_threshold
+        gamma: float = 0.1,           # Natural gradient default learning rate
+        maxiter: int = 1000,          # Number of max iterations to perform, by default perform all of them
+        pred_threshold: float = 0.5,  # Decision boundary in binary classification p(y=1) >= pred_threshold
         random_state: int = 42,
         # ----- New data split controls (only for array inputs)
         frac_val: float = 0.2,
         frac_test: float = 0.2,
         # ----- Policy flags for adaptation / early stopping
         use_validation_for_adaptation: bool = False,  # if True and val exists, adapt LR/ES on val; else train-only
-        enable_adaptation: bool = True,  # enable LR reduce-on-plateau on chosen set
-        enable_early_stopping: bool = False,  # enable early stopping on chosen set
+        enable_adaptation: bool = True,               # Enable LR reduce-on-plateau on chosen set
+        enable_early_stopping: bool = False,          # Enable early stopping on chosen set
         # Run naming / Logging
         results_dir: str = "./results",
         run_name: Optional[str] = None,
@@ -278,46 +281,53 @@ class GPClassificationRunner:
 
         # Store Run naming / Logging
         self.results_root = Path(results_dir)
-        self.run_name = run_name or f"run_{_now_stamp()}"
-        self.run_dir = self.results_root / self.run_name
+        self.run_name     = run_name or f"run_{_now_stamp()}"
+        self.run_dir      = self.results_root / self.run_name
         _ensure_dir(self.run_dir)  # Create folder
 
-        # Placeholders updated by `_load_and_prepare_data`,
+        # Placeholders updated by `_load_and_prepare_data`
         self.has_train = False
-        self.has_val = False
-        self.has_test = False
+        self.has_val   = False
+        self.has_test  = False
 
-        self.s: int = 0  # number of EEG sensors
+        self.s: int       = 0  # number of EEG sensors
         self.N_train: int = 0
-        self.N_val: int = 0
-        self.N_test: int = 0
+        self.N_val: int   = 0
+        self.N_test: int  = 0
 
-        self.X_train: Optional[np.ndarray] = None  # (N_train, D)
-        self.X_val: Optional[np.ndarray] = None  # (N_val, D)
-        self.X_test: Optional[np.ndarray] = None  # (N_test, D)
-        self.Y_train: Optional[np.ndarray] = None  # (N_train, 1)
-        self.Y_val: Optional[np.ndarray] = None  # (N_val, 1)
-        self.Y_test: Optional[np.ndarray] = None  # (N_test, 1)
+        self.X_train: Optional[np.ndarray]        = None  # (N_train, D)
+        self.X_val: Optional[np.ndarray]          = None    # (N_val, D)
+        self.X_test: Optional[np.ndarray]         = None   # (N_test, D)
+        self.Y_train: Optional[np.ndarray]        = None  # (N_train, 1)
+        self.Y_val: Optional[np.ndarray]          = None    # (N_val, 1)
+        self.Y_test: Optional[np.ndarray]         = None   # (N_test, 1)
 
-        self.W_init: Optional[np.ndarray] = None  # (s, nf)
+        self.W_init: Optional[np.ndarray]         = None   # (s, nf)
         self.model: Optional[gpflow.models.Model] = None
-        self.kernel: Optional[CustomKernel] = None
+        self.kernel: Optional[CustomKernel]       = None
 
         # Outputs and logs
-        self.p_train_seq: List[np.ndarray] = []  # list of probabilty arrays (N_train,)
-        self.p_val_seq: List[np.ndarray] = []  # (N_val,)
-        self.p_test_seq: List[np.ndarray] = []  # (N_test,)
-        self.y_train_seq: List[np.ndarray] = []  # list of label arrays (N_train,)
-        self.y_val_seq: List[np.ndarray] = []  # (N_val,)
-        self.y_test_seq: List[np.ndarray] = []  # (N_test,)
+        # self.p_train_seq: List[np.ndarray] = []  # list of probabilty arrays (N_train,)
+        # self.p_val_seq: List[np.ndarray] = []    # (N_val,)
+        # self.p_test_seq: List[np.ndarray] = []   # (N_test,)
+        # self.y_train_seq: List[np.ndarray] = []  # list of label arrays (N_train,)
+        # self.y_val_seq: List[np.ndarray] = []    # (N_val,)
+        # self.y_test_seq: List[np.ndarray] = []   # (N_test,)
 
         self.run_log: Optional[RunLog] = None
 
         # Best-checkpoint tracking
-        self._best_score: float = float("inf")
-        self._best_iter: Optional[int] = None
+        self._best_score: float               = float("inf")
+        self._best_iter: Optional[int]        = None
         self._best_metric_name: Optional[str] = None
-        self._best_params: Optional[Dict] = None  # gpflow parameter dict snapshot
+        self._best_params: Optional[Dict]     = None  # gpflow parameter dict snapshot
+        
+        self._p_train_best = None
+        self._p_val_best   = None
+        self._p_test_best  = None
+        self._y_train_best = None
+        self._y_val_best   = None
+        self._y_test_best  = None
 
     # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
     # ~~~~~~~~~~~~~~~ High level method ~~~~~~~~~~~~~~~
@@ -325,27 +335,33 @@ class GPClassificationRunner:
         """
         Execute the full pipeline
         """
-        self._print_message(which="start")
-        self._create_config_file()  # Build config file for reproducibility
-        self._load_and_prepare_data()  # X_train, X_val, X_test, Y_train, Y_val, Y_test, N_train, N_val, N_test, s
-
-        self._initialize_W_matrix()  # W_init
-
-        # Define model by specifying kernel, likelihood, and method
-        self._build_model()  # self.kernel, self.likelihood, self.model
-        # self._warm_start_variational()
-
-        # Define optimizers
-        self._build_optimizers()  # self.opt, self.natgrad
-
+        self._print_message(which="start") ###################################### START
+        self._create_config_file()
+            # Generates -> self.cfg
+            
+        ######################################################################### PREPARATION PHASE
+        self._load_and_prepare_data() 
+            # Generates -> self.X_train,   self.X_val,   self.X_test
+            #              self.Y_train,   self.Y_val,   self.Y_test
+            #              self.has_train, self.has_val, self.has_test
+            #              self.N_train,   self.N_val,   self.N_test
+        self._initialize_W_matrix()    
+            # Generates -> self.W_init, self.W_trainable
+        self._build_model()
+            # Generates -> self.kernel, self.likelihood, self.model
+        # self._warm_start_variational() # Way to set variational parameters at start
+        self._build_optimizers()  
+            # Generates -> self.opt, self.natgrad
+        
+        ######################################################################### TRAIN / LOG PHASE
         self._train()
-        self._write_config_file()  # Write config file to `config.json`
         self._build_and_write_runlog()  # Build and write RunLog
 
+        ######################################################################### PLOTTING PHASE
         self._make_visual_summary()  # Visual outputs
-
-        self._print_message(which="end")
-
+        self._print_message(which="end") ######################################## END
+        
+        
     def _make_visual_summary(self) -> None:
         """
         Generate visual outputs as summary of the training process (PNGs + GIFs)
@@ -358,7 +374,7 @@ class GPClassificationRunner:
         self._plot_learning_rates()
         self._plot_kernel_scaling()
         self._plot_kernel_W()
-        self._plot_kernel_eigs()  # diagnostic for Grahm matrix / if `eigs_bool` flag is False, no plot will be shown
+        
         self._plot_topomap()
 
         self._plot_confusion_matrix()
@@ -375,11 +391,14 @@ class GPClassificationRunner:
         self._plot_vgp_latent_marginals()
         self._plot_posterior_q_standardized()
         self._plot_posterior_q_correlation_block()
-        self._plot_posterior_covariance_eigs()
+        
+        try:
+            self._plot_posterior_covariance_eigs()
+        except:
+            pass
+        
         self._plot_uncertainty_vs_error()
-
         self._plot_sv()
-        # self._plot_sv_evolution() # this is very time consuming if `self.maxiter` >> 1
 
         # TODO: plot decision boundary and features
 
@@ -403,54 +422,46 @@ class GPClassificationRunner:
 
     def _create_config_file(self) -> None:
         """
-        Generate config.json for bookkeeping and recalling
+        Generate `self.cfg` for bookkeeping and recalling
         Done at the *start* of the run
         Shapes are appended after data load
         """
         self.cfg: Dict[str, Any] = {
             # Naming
-            "run_name": self.run_name,
-            "dataset_label": self.dataset_label,
-            "results_dir": str(self.results_root.resolve()),
+            "run_name"       : self.run_name,
+            "dataset_label"  : self.dataset_label,
+            "results_dir"    : str(self.results_root.resolve()),
             "timestamp_start": _now_stamp(),
             # IO
             "data_input_mode": "dict" if isinstance(self.X, dict) else "array",
-            "#channels": len(self.ch_names),
+            "#channels"      : len(self.ch_names),
             # Model
             "spatialFilter_init": (
                 {"type": "array", "shape": list(self.spatialFilter_init.shape)}
                 if isinstance(self.spatialFilter_init, np.ndarray)
                 else self.spatialFilter_init
             ),
-            "nf": self.nf,
-            "eta_flag": self.eta_flag,
-            "ard_flag": self.ard_flag,
-            "logged_flag": self.logged_flag,
-            "kernel_type": self.kernel_type,
-            "model_class": self.model_class.__name__,
-            "likelihood_class": self.likelihood_class.__name__,
-            "has_custom_training_loss_fn": self.external_training_loss_fn is not None,
-            "has_custom_predict_y_fn": self.external_predict_y_fn is not None,
+            "nf"                           : self.nf,
+            "eta_flag"                     : self.eta_flag,
+            "ard_flag"                     : self.ard_flag,
+            "logged_flag"                  : self.logged_flag,
+            "kernel_type"                  : self.kernel_type,
+            "model_class"                  : self.model_class.__name__,
+            "likelihood_class"             : self.likelihood_class.__name__,
+            "has_custom_training_loss_fn"  : self.external_training_loss_fn is not None,
+            "has_custom_predict_y_fn"      : self.external_predict_y_fn is not None,
             # Training
-            "learning_rate_default": self.learning_rate,
-            "gamma_default": self.gamma,
-            "maxiter": self.maxiter,
-            "pred_threshold": self.pred_threshold,
-            "random_state": self.random_state,
-            "frac_val": self.frac_val if hasattr(self, "frac_val") else None,
-            "frac_test": self.frac_test if hasattr(self, "frac_test") else None,
+            "learning_rate_default"        : self.learning_rate,
+            "gamma_default"                : self.gamma,
+            "maxiter"                      : self.maxiter,
+            "pred_threshold"               : self.pred_threshold,
+            "random_state"                 : self.random_state,
+            "frac_val"                     : self.frac_val if hasattr(self, "frac_val") else None,
+            "frac_test"                    : self.frac_test if hasattr(self, "frac_test") else None,
             "use_validation_for_adaptation": self.use_validation_for_adaptation,
-            "enable_adaptation": self.enable_adaptation,
-            "enable_early_stopping": self.enable_early_stopping,
+            "enable_adaptation"            : self.enable_adaptation,
+            "enable_early_stopping"        : self.enable_early_stopping,
         }
-
-    def _write_config_file(self) -> None:
-        """
-        Write the final version of the config file
-        """
-        _ensure_dir(self.run_dir)
-        with open(self.run_dir / "config.json", "w") as f:
-            json.dump(self.cfg, f, indent=2)
 
     def _build_montage_from_xy(
         self,
@@ -529,23 +540,23 @@ class GPClassificationRunner:
             Set attributes and counters for all sets
             """
             self.X_train, self.Y_train = Xtr, Ytr
-            self.X_val, self.Y_val = Xva, Yva
-            self.X_test, self.Y_test = Xte, Yte
+            self.X_val,   self.Y_val   = Xva, Yva
+            self.X_test,  self.Y_test  = Xte, Yte
 
             self.has_train = Xtr is not None
-            self.has_val = Xva is not None
-            self.has_test = Xte is not None
+            self.has_val   = Xva is not None
+            self.has_test  = Xte is not None
 
             self.N_train = int(len(Xtr)) if self.has_train else 0
-            self.N_val = int(len(Xva)) if self.has_val else 0
-            self.N_test = int(len(Xte)) if self.has_test else 0
+            self.N_val   = int(len(Xva)) if self.has_val   else 0
+            self.N_test  = int(len(Xte)) if self.has_test  else 0
 
             # Update the config file with dimensions
             self.cfg.update(
                 {
                     "N_train": self.N_train,
-                    "N_val": self.N_val,
-                    "N_test": self.N_test,
+                    "N_val"  : self.N_val,
+                    "N_test" : self.N_test,
                 }
             )
 
@@ -555,7 +566,7 @@ class GPClassificationRunner:
                 )
 
         # Validate fraction settings if needed
-        frac_val = float(getattr(self, "frac_val", 0.0) or 0.0)
+        frac_val  = float(getattr(self, "frac_val",  0.0) or 0.0)
         frac_test = float(getattr(self, "frac_test", 0.0) or 0.0)
         if not (0.0 <= frac_val <= 1.0 and 0.0 <= frac_test <= 1.0):
             raise ValueError("frac_val and frac_test must be in (0, 1)")
@@ -582,15 +593,15 @@ class GPClassificationRunner:
             # If any of the splits are present, assign them
             if Xtr is not None:
                 Xtr = _flatten_3d_to_2d(Xtr)  # shape (N_train, s*s)
-                Ytr = _to_col(Ytr)  # shape (N_train, 1)
+                Ytr = _to_col(Ytr)            # shape (N_train, 1)
             else:
                 raise ValueError("Input require at least `train`")
             if Xva is not None:
                 Xva = _flatten_3d_to_2d(Xva)  # shape (N_val, s*s)
-                Yva = _to_col(Yva)  # shape (N_val, 1)
+                Yva = _to_col(Yva)            # shape (N_val, 1)
             if Xte is not None:
                 Xte = _flatten_3d_to_2d(Xte)  # shape (N_test, s*s)
-                Yte = _to_col(Yte)  # shape (N_test, 1)
+                Yte = _to_col(Yte)            # shape (N_test, 1)
 
             _set_attrs(Xtr, Ytr, Xva, Yva, Xte, Yte)
             return
@@ -601,7 +612,7 @@ class GPClassificationRunner:
         else:
             self.s = self.X.shape[-1]
             X_all = _flatten_3d_to_2d(self.X)  # shape (N, s*s)
-            Y_all = _to_col(self.Y)  # shape (N, 1)
+            Y_all = _to_col(self.Y)            # shape (N, 1)
 
             if frac_val == 0.0 and frac_test == 0.0:
                 # All data is used for train
@@ -667,7 +678,7 @@ class GPClassificationRunner:
             
             if self.spatialFilter_init == "random":
                 # Randomize initial coefficients using Gaussian -> N(0, 0.1)
-                self.W_init = rng.normal(loc=0.0, scale=1, size=(self.s, self.nf))
+                self.W_init = rng.normal(loc=0.0, scale=0.1, size=(self.s, self.nf))
 
             elif self.spatialFilter_init == "ones":
                 # Set all initial coefficients to 1
@@ -739,7 +750,7 @@ class GPClassificationRunner:
         })
 
     # ----------------- Model / Kernel builders ----------------- #
-    def _build_kernel(self) -> None:
+    def _build_model_kernel(self) -> None:
         """
         Build a GPflow kernel to pass to the model
         """
@@ -754,7 +765,7 @@ class GPClassificationRunner:
         )
         return
 
-    def _build_likelihood(self) -> None:
+    def _build_model_likelihood(self) -> None:
         """
         Build a GPflow likelihood to pass to the model
         """
@@ -770,8 +781,8 @@ class GPClassificationRunner:
         """
         Build a GPflow model with chosen kernel, likelihood, and method
         """
-        self._build_kernel()  # self.kernel
-        self._build_likelihood()  # self.likelihood
+        self._build_model_kernel()     # self.kernel
+        self._build_model_likelihood() # self.likelihood
 
         # Define the model to use for the classification, by default we are using Variational Gaussian Process (VGP)
         # Try to instantiate with data (VGP, GPR, etc. usually accept it)
@@ -794,7 +805,7 @@ class GPClassificationRunner:
                 **self.model_kwargs,
             )
             # Note: for SVGP you likely need a custom `training_loss_fn`
-            # that closes over minibatches and a separate dataset.
+            # that closes over minibatches and a separate dataset
         return
 
     def _warm_start_variational(
@@ -809,11 +820,12 @@ class GPClassificationRunner:
         if not hasattr(self, "model") or self.model is None:
             return
         if not (hasattr(self.model, "q_mu") and hasattr(self.model, "q_sqrt")):
+            # Must work for variational model only which is the only one provided by gpflow
             return
 
-        # Build ±1 targets from {0,1} labels
+        # Remap labels from {0, 1} to {-1, +1}
         y = np.asarray(self.Y_train).reshape(-1)
-        ypm = 2.0 * y - 1.0  # 0 -> -1, 1 -> +1
+        ypm = 2.0 * y - 1.0
 
         # q_mu shape [N, P]
         q_mu = self.model.q_mu
@@ -845,22 +857,22 @@ class GPClassificationRunner:
         """
         # Initialization of self contained structure for learning rate adaptation
         self._lr_state = {
-            "step": 0,
-            "lr": self.learning_rate,  # current LR value
-            "base_lr": self.learning_rate,  # starting LR value
-            "min_lr": 1e-5,  # mininum allowed
-            "max_lr": self.learning_rate,  # maximum allowed
+            "step"        : 0,
+            "lr"          : self.learning_rate,  # current LR value
+            "base_lr"     : self.learning_rate,  # starting LR value
+            "min_lr"      : 1e-5,  # mininum allowed
+            "max_lr"      : self.learning_rate,  # maximum allowed
             "decay_factor": 0.5,  # decay factor on plateau
-            "patience": max(
+            "patience"    : max(
                 int(0.05 * self.maxiter), 20
             ),  # number of steps allowed for repeated plateau behavior
-            "cooldown": min(
+            "cooldown"    : min(
                 int(0.05 * self.maxiter), 35
             ),  # general counter to avoid instant reactions
-            "tolerance": 1e-3,  # value used to define change in metric
-            "best": 1e4,  # best metric value seen
-            "ema": None,  # exponential moving average (EMA) of metric
-            "ema_beta": 0.8,  # decay factor for EMA
+            "tolerance"   : 1e-3,  # value used to define change in metric
+            "best"        : 1e4,  # best metric value seen
+            "ema"         : None,  # exponential moving average (EMA) of metric
+            "ema_beta"    : 0.8,  # decay factor for EMA
             "warmup_steps": max(int(0.02 * self.maxiter), 10),  # ~2% warmup steps
         }
 
@@ -875,7 +887,7 @@ class GPClassificationRunner:
         # RMSprop: scales the `learning_rate` for each parameter based on the root mean square of past squared gradients
         self.opt = tf.keras.optimizers.Adam(learning_rate=float(self.learning_rate))
 
-        # Optimizer 2 for variational parameters (VGP) if needed
+        # Optimizer 2 for variational parameters (VGP)
         # - NaturalGradient: gamma is predefined according to custom schedule
         # Detect whether the model actually exposes variational params to set up natural gradient
         use_natgrad = hasattr(self.model, "q_mu") and hasattr(self.model, "q_sqrt")
@@ -900,10 +912,10 @@ class GPClassificationRunner:
 
         # Phase boundaries
         warmup_steps = max(int(math.ceil(0.05 * self.maxiter)), 1)  # first 5% of steps
-        warmup_end = min(warmup_steps, self.maxiter)  # at 5% overall
+        warmup_end = min(warmup_steps, self.maxiter)                # at 5% overall
 
-        boost_steps = max(int(math.ceil(0.15 * self.maxiter)), 1)  # next 15% of steps
-        boost_end = min(warmup_steps + boost_steps, self.maxiter)  # at 20% overall
+        boost_steps = max(int(math.ceil(0.15 * self.maxiter)), 1)   # next 15% of steps
+        boost_end = min(warmup_steps + boost_steps, self.maxiter)   # at 20% overall
 
         if self.step <= warmup_end:
             # Warmup (5% of maxiter)
@@ -936,7 +948,7 @@ class GPClassificationRunner:
         """
         if self.natgrad is not None:
             # Adapt gamma value before taking the step
-            self.natgrad.gamma = self._adapt_gamma()  # always happens
+            self.natgrad.gamma = self._adapt_gamma()  # adaptation always happens, there is no flag to trigger this
             # Natrual Gradient step
             self.natgrad.minimize(
                 lambda: self.loss_fn(self.model),
@@ -949,18 +961,20 @@ class GPClassificationRunner:
     def _current_adaptation_metric_value(self) -> Optional[float]:
         """
         Return the scalar metric for LR adaptation at the current model state:
-        - validation NLPD if available and enabled,
+        - validation NLPD if available and enabled by `self.use_validation_for_adaptation`
         - otherwise training NLML
         """
         try:
             if getattr(self, "use_validation_for_adaptation", False) and getattr(
                 self, "has_val", False
             ):
+                # Calculate the NLPD using the validation set
                 p_val = self._predict_prob(self.model, self.X_val)
                 m_val = self._compute_metrics(self.Y_val, p_val)
                 nlpd = m_val.get("nlpd", None)
                 return float(nlpd) if nlpd is not None else None
             else:
+                # Calculate the NLML which is the default loss function
                 return float(self.loss_fn(self.model).numpy())
         except Exception:
             return None
@@ -969,22 +983,23 @@ class GPClassificationRunner:
         """
         Adapt Adam learning rate using ONLY the EMA of the chosen metric
         Metric:
-            - NLML on train, unless validation is present AND
-            `use_validation_for_adaptation` is True, then use val NLPD
+            - NLML on train, unless validation is present AND `use_validation_for_adaptation` is True
+                -> use val NLPD
         Delta:
-            - delta := EMA_t - EMA_{t-1} of the chosen metric.
+            - delta := EMA_t - EMA_{t-1} of the chosen metric
         Policy:
-            - |delta| <= tolerance      -> plateau; decay on patience, cooldown.
-            - delta >= +big_delta       -> big WORSE jump; stronger decay, cooldown.
-            - delta <= -big_delta       -> big BETTER drop; gentle growth, cooldown.
-            - otherwise                 -> small move; reset plateau on improvement.
+            - |delta| <= tolerance -> plateau; decay on patience, cooldown
+            - delta >= +big_delta  -> big WORSE jump; stronger decay, cooldown
+            - delta <= -big_delta  -> big BETTER drop; gentle growth, cooldown
+            - otherwise            -> small move; reset plateau on improvement
 
-        The method _build_optimizers() builds the dictionary `self._lr_state` which is apdated as the training progresses
+        The method `_build_optimizers()` builds the dictionary `self._lr_state` 
+        This is apdated as the training progresses
         """
         s = self._lr_state
 
         # Generate some default new keys for the learning rate dictionary `self._lr_state`
-        s.setdefault("plateau_count", 0)  # number of steps in EMA plateau
+        s.setdefault("plateau_count", 0)    # current number of steps in EMA plateau
         s.setdefault("big_change_mult", 6)  # scaling factor to define big change
         s.setdefault("growth_factor", 1.2)  # LR bump on big improvement
         s.setdefault("min_steps_between_growth", 40)
@@ -1107,7 +1122,6 @@ class GPClassificationRunner:
     def _step_adam(self) -> None:
         """
         Perform a step of Adam
-        Learning rate is fixed but Adam adapts the step on the hyperparameters individually with RMSprop
         """
         with tf.GradientTape() as tape:
             nlml = self.loss_fn(self.model)
@@ -1130,40 +1144,24 @@ class GPClassificationRunner:
 
     def _print_state_on_terminal(self) -> None:
         """
-        Print training information on terminal as an update to the user
+        Print training information on terminal as an update
         """
-
         def _fmt(v):
             """
             Format a number to 3 decimals or return '/' when missing/non-finite
             """
             return f"{float(v):.3f}" if (v is not None and np.isfinite(v)) else "/"
 
+        # Grab last logged metrics
         last = self.logs[-1]
 
-        train_tail = (
-            f" | acc_train {last.acc_train:.3f} | brier_train {last.brier_train:.3f}"
-        )
-        val_tail = (
-            f" | acc_val {last.acc_val:.3f} | brier_val {last.brier_val:.3f}"
-            if getattr(self, "has_val", False)
-            else ""
-        )
-        test_tail = (
-            f" | acc_test {last.acc_test:.3f} | brier_test {last.brier_test:.3f}"
-            if getattr(self, "has_test", False)
-            else ""
-        )
-
+        # Define rows of text to print
         accuracy = f" | accuracy ({_fmt(last.acc_train)}, {_fmt(last.acc_val)}, {_fmt(last.acc_test)})"
-        brier = f" | brier ({_fmt(last.brier_train)}, {_fmt(last.brier_val)}, {_fmt(last.brier_test)})"
-        nlpd = f" | nlpd ({_fmt(last.nlpd_train)}, {_fmt(last.nlpd_val)}, {_fmt(last.nlpd_test)})"
+        brier    = f" | brier    ({_fmt(last.brier_train)}, {_fmt(last.brier_val)}, {_fmt(last.brier_test)})"
+        nlpd     = f" | nlpd     ({_fmt(last.nlpd_train)}, {_fmt(last.nlpd_val)}, {_fmt(last.nlpd_test)})"
 
         print(
             f"[{int(last.step/self.maxiter * 100)}%] Iter {last.step:4d}/{self.maxiter} | nlml {last.nlml:.3f}"
-            # f"{train_tail}"
-            # f"{val_tail}"
-            # f"{test_tail}"
             f"{accuracy}"
             f"{brier}"
             f"{nlpd}"
@@ -1194,22 +1192,21 @@ class GPClassificationRunner:
                 return p, None
 
         3) I'm sure there are other reasons...
-
         """
         if self.external_predict_y_fn is not None:
             # Use provided function to predict probabilties
             probs, _ = self.external_predict_y_fn(model, X)  # mean, var
             return np.asarray(probs).ravel()
-
-        # Use standard method to predict probabilties
-        # This computes the predictive class probability by integrating over the uncertainty in latent function f
-        # p(Y=1 ∣ X∗) = E(f∼N(mu, var))[σ(f)]
-        # p(Y=0 ∣ X∗) = 1 - p(Y=1 ∣ X∗)
-        # This is p(Y=1 ∣ X∗), probability of X being label 1
-        probs, _ = model.predict_y(
-            tf.convert_to_tensor(X, dtype=tf.float64)
-        )  # mean, var
-        return probs.numpy().ravel()
+        else:
+            # Use standard method to predict probabilties
+            # This computes the predictive class probability by integrating over the uncertainty in latent function f
+            # p(Y=1 ∣ X∗) = E(f∼N(mu, var))[σ(f)]
+            # p(Y=0 ∣ X∗) = 1 - p(Y=1 ∣ X∗)
+            # This is p(Y=1 ∣ X∗), probability of X being label 1
+            probs, _ = model.predict_y(
+                tf.convert_to_tensor(X, dtype=tf.float64)
+            )  # mean, var
+            return probs.numpy().ravel()
 
     def _compute_metrics(
         self, y_true: Optional[np.ndarray], p: Optional[np.ndarray]
@@ -1220,23 +1217,22 @@ class GPClassificationRunner:
         """
         # Define default container for all metrics
         metrics: Dict[str, Optional[float]] = {
-            "acc": None,
-            "brier": None,
+            "acc"   : None,
+            "brier" : None,
             "aucroc": None,
-            "aucpr": None,
-            "nlpd": None,
+            "aucpr" : None,
+            "nlpd"  : None,
         }
         # Safety check
-        if y_true is None or p is None:
-            return metrics
+        if y_true is None or p is None: return metrics
 
         y_true = y_true.ravel().astype(int)
-        p = p.ravel().astype(np.float64)
+        p      = p.ravel().astype(np.float64)
 
         # Predicted labels at current iterations (consistent with choice of `pred_threshold`)
         y_hat = (p >= self.pred_threshold).astype(int)
 
-        # Accuracy, assumes classes are well balanced, otherwise highly biased
+        # Accuracy, assumes classes are well balanced, otherwise highly biased metric
         metrics["acc"] = float(accuracy_score(y_true, y_hat))
 
         # Brier score
@@ -1259,20 +1255,19 @@ class GPClassificationRunner:
         # Negative log predictive density (Bernoulli log loss / cross entropy)
         # Both the overall sum or the average value are ok, the average value is more translatable
         eps = 1e-12
-        p_clip = np.clip(p, eps, 1.0 - eps)
+        p_clip = np.clip(p, eps, 1.0 - eps) # (safeguard) clip probabilities to eps < p < 1-eps
         ll = y_true * np.log(p_clip) + (1 - y_true) * np.log(1.0 - p_clip)
         metrics["nlpd"] = float(-np.mean(ll))
 
         return metrics
 
-    def _snapshot_kernel(self, eigs_bool: bool = False) -> Dict[str, Optional[Any]]:
+    def _snapshot_kernel(self) -> Dict[str, Optional[Any]]:
         """
         Grab kernel parameters
         """
         W = None
         eta = None
         ard = None
-        eigs = None
 
         if self.kernel is not None:
             # W
@@ -1309,30 +1304,13 @@ class GPClassificationRunner:
             except Exception:
                 ard = None
 
-            # Optional eigenvalues of Gram on a small subset
-            if eigs_bool:
-                try:
-                    Xg = self.X_train if self.X_train is not None else None
-                    if Xg is not None:
-                        # Could use reduce dim to keep it light
-                        # m = min(64, Xg.shape[0])
-                        # Otherwise full rank
-                        m = Xg.shape[0]
-                        K = self.kernel.K(
-                            tf.convert_to_tensor(Xg[:m], dtype=tf.float64)
-                        ).numpy()
-                        eigs = np.maximum(np.linalg.eigvalsh(K), 0.0).tolist()
-                except Exception:
-                    eigs = None
-            else:
-                eigs = None
+        return {"W": W, "eta": eta, "ard": ard}
 
-        return {"W": W, "eta": eta, "ard": ard, "eigs": eigs}
-
-    def _snapshot_iteration(self, p_train, p_val, p_test) -> None:
+    def _snapshot_iteration(self, p_train: np.array, p_val: np.array, p_test: np.array) -> None:
         """
         Save per-iteration predictions, labels, and metrics for logging
         """
+        '''
         # Predicted labels at current iterations (consistent with choice of `pred_threshold`)
         yhat_train = (
             (p_train >= self.pred_threshold).astype(int)
@@ -1366,19 +1344,16 @@ class GPClassificationRunner:
         self.y_test_seq.append(
             yhat_test if yhat_test is not None else np.array([], dtype=int)
         )
-
+        '''
         # Snapshot metrics (dict)
         m_train = self._compute_metrics(self.Y_train, p_train)
-        m_val = self._compute_metrics(self.Y_val, p_val)
-        m_test = self._compute_metrics(self.Y_test, p_test)
+        m_val   = self._compute_metrics(self.Y_val,   p_val  )
+        m_test  = self._compute_metrics(self.Y_test,  p_test )
+        
+        kernel_snapshot = self._snapshot_kernel()       # dict for W, eta, ARD
+        nlml_ = float(self.loss_fn(self.model).numpy()) # current training NLML
 
-        # Snapshot kernel params (dict)
-        kernel_snapshot = self._snapshot_kernel()
-
-        # Current training NLML
-        nlml_ = float(self.loss_fn(self.model).numpy())
-
-        # Append IterLog
+        # store IterLog
         self.logs.append(
             IterLog(
                 step=int(self.step),
@@ -1401,7 +1376,6 @@ class GPClassificationRunner:
                 W=kernel_snapshot["W"],
                 eta=kernel_snapshot["eta"],
                 ard=kernel_snapshot["ard"],
-                kernel_eigs=kernel_snapshot["eigs"],
                 lr=self._lr_state["lr"],
                 ema=self._lr_state["ema"],
                 gamma=self.natgrad.gamma,
@@ -1417,26 +1391,41 @@ class GPClassificationRunner:
         if self.use_validation_for_adaptation and self.has_val:
             name, value = "nlpd_val", last.nlpd_val
         else:
-            name, value = "nlml", last.nlml
+            name, value = "nlml",    last.nlml
         return name, value
 
-    def _check_for_best_iteration(self) -> None:
+    def _check_for_best_iteration(self, 
+                                  p_train_at_iter: np.array = None, 
+                                  p_val_at_iter  : np.array = None, 
+                                  p_test_at_iter : np.array = None,
+    ) -> None:
         """
         If the current iteration improves the chosen metric, snapshot parameters
         """
-        last = self.logs[-1]
+        last = self.logs[-1] # grab last stored metrics
         name, value = self._selection_metric(last)
         if value is None or not np.isfinite(value):
             return
-        # This is a minimization process
+        # This is a minimization process, we check for lower values
         if value < self._best_score:
-            self._best_score = float(value)
-            self._best_iter = self.step
+            self._best_score       = float(value)
+            self._best_iter        = self.step
             self._best_metric_name = name
             # Snapshot GPflow parameters (trainable + non-trainable)
             # Keep tensors detached so later mutations don't alias
             params_dict = gpflow.utilities.parameter_dict(self.model)
             self._best_params = {k: tf.identity(v) for k, v in params_dict.items()}
+
+        # Also snapshot best probabilities and labels at this iteration
+        if p_train_at_iter is not None:
+            self._p_train_best = np.asarray(p_train_at_iter, dtype=float).ravel()
+            self._y_train_best = (self._p_train_best >= self.pred_threshold).astype(int)
+        if p_val_at_iter is not None:
+            self._p_val_best = np.asarray(p_val_at_iter, dtype=float).ravel()
+            self._y_val_best = (self._p_val_best >= self.pred_threshold).astype(int)
+        if p_test_at_iter is not None:
+            self._p_test_best = np.asarray(p_test_at_iter, dtype=float).ravel()
+            self._y_test_best = (self._p_test_best >= self.pred_threshold).astype(int)
 
     def _check_for_early_stopping(self) -> None:
         """
@@ -1452,7 +1441,7 @@ class GPClassificationRunner:
         self.loss_fn = self.external_training_loss_fn or (lambda m: m.training_loss())
 
         # Printing and logging
-        self.logs: List[IterLog] = []  # Initialize containers for per-iter logging
+        self.logs: List[IterLog] = []                   # Initialize containers for per-iter logging
         print_terminal_fr = max(1, self.maxiter // 10)  # Frequency of terminal msg
 
         # Training process (iterative)
@@ -1469,19 +1458,15 @@ class GPClassificationRunner:
 
             # Predict probabilities at current iteration
             p_train_at_iter = self._predict_prob(self.model, self.X_train)
-            p_val_at_iter = (
-                self._predict_prob(self.model, self.X_val) if self.has_val else None
-            )
-            p_test_at_iter = (
-                self._predict_prob(self.model, self.X_test) if self.has_test else None
-            )
+            p_val_at_iter   = self._predict_prob(self.model, self.X_val  ) if self.has_val  else None
+            p_test_at_iter  = self._predict_prob(self.model, self.X_test ) if self.has_test else None
 
             # Snapshot kernel and metrics at current iteration
             # Build and store the IterLog
             self._snapshot_iteration(p_train_at_iter, p_val_at_iter, p_test_at_iter)
 
             # Track improvement for `best` iteration
-            self._check_for_best_iteration()
+            self._check_for_best_iteration(p_train_at_iter, p_val_at_iter, p_test_at_iter)
 
             # Print info to terminal
             if self.step % print_terminal_fr == 0 or self.step == 1:
@@ -1511,8 +1496,8 @@ class GPClassificationRunner:
     # ----------------- RunLog ----------------- #
     def _build_and_write_runlog(self) -> None:
         """
-        Build RunLog  and write JSON file
         Convert numpy arrays to lists
+        Build RunLog and write JSON file
         """
 
         def _tolist_seq(seq: List[np.ndarray]) -> List[List[float]]:
@@ -1525,6 +1510,7 @@ class GPClassificationRunner:
         # `final` doesn't mean from the last iteration but from the best iteration
         # `best` comes from the metric under examination, most of the time it's NLML
         # but it coudl be NLPD from the validation test
+        '''
         # Choose best iteration index for `final` snapshot
         # Index of the best iteration
         best_idx = self._best_iter - 1
@@ -1544,22 +1530,31 @@ class GPClassificationRunner:
         y_test_best = (
             self.y_test_seq[best_idx].ravel().tolist() if self.y_test_seq else []
         )
+        '''
+        # Build best-only snapshots directly from stored best arrays
+        p_train_best = [] if self._p_train_best is None else self._p_train_best.astype(float).ravel().tolist()
+        p_val_best   = [] if self._p_val_best   is None else self._p_val_best.astype(float).ravel().tolist()
+        p_test_best  = [] if self._p_test_best  is None else self._p_test_best.astype(float).ravel().tolist()
+
+        y_train_best = [] if self._y_train_best is None else np.asarray(self._y_train_best, dtype=int).ravel().tolist()
+        y_val_best   = [] if self._y_val_best   is None else np.asarray(self._y_val_best,   dtype=int).ravel().tolist()
+        y_test_best  = [] if self._y_test_best  is None else np.asarray(self._y_test_best,  dtype=int).ravel().tolist()
 
         self.run_log = RunLog(
             meta=deepcopy(self.cfg),
             logs=self.logs,
-            p_train_seq=_tolist_seq(self.p_train_seq),
-            p_train_best=p_train_best,
-            y_train_seq=_tolist_seq_int(self.y_train_seq),
-            y_train_best=y_train_best,
-            p_val_seq=_tolist_seq(self.p_val_seq),
-            p_val_best=p_val_best,
-            y_val_seq=_tolist_seq_int(self.y_val_seq),
-            y_val_best=y_val_best,
-            p_test_seq=_tolist_seq(self.p_test_seq),
-            p_test_best=p_test_best,
-            y_test_seq=_tolist_seq_int(self.y_test_seq),
-            y_test_best=y_test_best,
+            #p_train_seq = _tolist_seq(self.p_train_seq),
+            #y_train_seq = _tolist_seq_int(self.y_train_seq),
+            #p_val_seq   = _tolist_seq(self.p_val_seq),
+            #y_val_seq   = _tolist_seq_int(self.y_val_seq),
+            #p_test_seq  = _tolist_seq(self.p_test_seq),
+            #y_test_seq  = _tolist_seq_int(self.y_test_seq),
+            p_train_best = p_train_best,
+            y_train_best = y_train_best,
+            p_val_best   = p_val_best,
+            y_val_best   = y_val_best,
+            p_test_best  = p_test_best,
+            y_test_best  = y_test_best,
         )
 
         # JSON serialization
@@ -1588,6 +1583,49 @@ class GPClassificationRunner:
             p = np.array(self.run_log.p_test_best)
         return y, p
 
+    def _get_best_snapshot(self, split: str) -> Tuple:
+        """
+        Return (y_true, p_best, y_best) for a split in {'train', 'val', 'test'}
+
+        This function ONLY reads the best snapshot saved in `self.run_log`
+        It never touches per-iteration sequences because those were removed
+        """
+        if split == "train":
+            y_true = np.asarray(self.Y_train).ravel()
+            p_best = np.asarray(self.run_log.p_train_best or [], dtype=float).ravel()
+            y_best = np.asarray(self.run_log.y_train_best or [], dtype=int).ravel()
+        elif split == "val":
+            y_true = np.asarray(self.Y_val).ravel()
+            p_best = np.asarray(self.run_log.p_val_best or [], dtype=float).ravel()
+            y_best = np.asarray(self.run_log.y_val_best or [], dtype=int).ravel()
+        elif split == "test":
+            y_true = np.asarray(self.Y_test).ravel()
+            p_best = np.asarray(self.run_log.p_test_best or [], dtype=float).ravel()
+            y_best = np.asarray(self.run_log.y_test_best or [], dtype=int).ravel()
+        else:
+            raise ValueError(f"Unknown split: {split}")
+
+        # If best labels weren't stored, derive them from probabilities
+        if y_best.size == 0 and p_best.size > 0:
+            thr = float(self.pred_threshold)
+            y_best = (p_best >= thr).astype(int)
+
+        return y_true, p_best, y_best
+
+    def _get_best_predictions(self, split: str):
+        """
+        Returns (y_true, y_pred_best) for a split
+        """
+        y_true, _, y_best = self._get_best_snapshot(split)
+        return y_true, y_best
+
+    def _get_best_probabilities(self, split: str):
+        """
+        Returns (y_true, p_best) for a split
+        """
+        y_true, p_best, _ = self._get_best_snapshot(split)
+        return y_true, p_best
+
     def _plot_learning_curves(self) -> None:
         """
         Plot curves used in training process (e.g. neg-elbo as nlml, nlpd_val, ...)
@@ -1601,8 +1639,8 @@ class GPClassificationRunner:
         fig, ax1 = plt.subplots(figsize=(8, 4.5))
         # -------------------------------------------------------
         steps = [l.step for l in self.run_log.logs]
-        nlml = [l.nlml for l in self.run_log.logs]
-        ema = [l.ema for l in self.run_log.logs]
+        nlml  = [l.nlml for l in self.run_log.logs]
+        ema   = [l.ema  for l in self.run_log.logs]
 
         ax1.plot(steps, nlml, linewidth=2, color="black", label="NLML")
         if (np.array(ema) == None).all() == False:
@@ -1675,18 +1713,21 @@ class GPClassificationRunner:
             Both are set to None if val or test sets are missing
             """
             if name == "train":
-                y = self.Y_train.ravel().astype(int)
-                p = np.array(self.run_log.p_train_best)
+                #y = self.Y_train.ravel().astype(int)
+                #p = np.array(self.run_log.p_train_best)
+                y, p = self._get_best_probabilities(split=name)
             elif name == "val":
                 if not getattr(self, "has_val", False):
                     return None, None
-                y = self.Y_val.ravel().astype(int)
-                p = np.array(self.run_log.p_val_best)
+                #y = self.Y_val.ravel().astype(int)
+                #p = np.array(self.run_log.p_val_best)
+                y, p = self._get_best_probabilities(split=name)
             else:  # last case is "test"
                 if not getattr(self, "has_test", False):
                     return None, None
-                y = self.Y_test.ravel().astype(int)
-                p = np.array(self.run_log.p_test_best)
+                #y = self.Y_test.ravel().astype(int)
+                #p = np.array(self.run_log.p_test_best)
+                y, p = self._get_best_probabilities(split=name)
             return y, p
 
         def _aucs(y: np.ndarray, p: np.ndarray) -> Tuple:
@@ -2014,8 +2055,8 @@ class GPClassificationRunner:
 
         splits = {
             "train": True,
-            "val": getattr(self, "has_val", False),
-            "test": getattr(self, "has_test", False),
+            "val"  : getattr(self, "has_val",  False),
+            "test" : getattr(self, "has_test", False),
         }
         curves = []
 
@@ -2025,7 +2066,7 @@ class GPClassificationRunner:
             else:
                 # Extract labels and probabilities
                 y_true, p = self._get_split(key)
-                brier = brier_score_loss(y_true, p)  # Brier's score
+                brier     = brier_score_loss(y_true, p) # Brier's score
 
                 # If too few test points, don't compute the plot
                 if p.size < 3:
@@ -2055,8 +2096,8 @@ class GPClassificationRunner:
                         break
 
                     # pick first underfilled bin
-                    b = next(i for i, c in enumerate(counts) if c < MIN_PER_BIN)
-                    left = b - 1 if b - 1 >= 0 else None
+                    b     = next(i for i, c in enumerate(counts) if c < MIN_PER_BIN)
+                    left  = b - 1 if b - 1 >= 0 else None
                     right = b + 1 if b + 1 < len(bin_indices) else None
 
                     if left is None and right is None:
@@ -2096,7 +2137,6 @@ class GPClassificationRunner:
         Plot calibration curves generated by the method `_generate_calibration_curves`
         Train, val and test are plot accordingly when available
         """
-
         curves = self._generate_calibration_curves()
 
         fig, ax = plt.subplots(figsize=(5.6, 5.6))
@@ -2206,7 +2246,7 @@ class GPClassificationRunner:
             the list has len() = self.s, one entry per channel
             the sub-lists have len() = self.nf, one entry per spatial filter
         """
-
+        
         fig, ax = plt.subplots(1, self.nf, figsize=(int(5 * self.nf), 4))
         # -------------------------------------------------------
         steps = [l.step for l in self.run_log.logs]  # shape (self.maxiter, )
@@ -2223,119 +2263,6 @@ class GPClassificationRunner:
             ax[k].set_xlim(0, self.maxiter)
         fig.tight_layout()
         fig.savefig(self.run_dir / "06_kernel_W.png", dpi=150)
-        plt.close(fig)
-
-    def _plot_kernel_eigs(self) -> None:
-        """
-        Plot kernel eigenvalues at the `best` iteration
-
-        Uses the eigenvalues stored in self.run_log.logs[self._best_iter - 1].kernel_eigs
-        Produces a semilog plot of sorted eigenvalues and an overlaid cumulative
-        energy curve
-        Annotates condition number and the effective rank at 99% energy
-        """
-        # Safety checks
-        if self.run_log is None or not self.run_log.logs or self._best_iter is None:
-            return
-
-        best_idx = int(self._best_iter - 1)
-        if best_idx < 0 or best_idx >= len(self.run_log.logs):
-            return
-
-        eigs = self.run_log.logs[best_idx].kernel_eigs
-        if eigs is None or len(eigs) == 0:
-            # Nothing to plot
-            return
-
-        # Prepare data
-        v = np.asarray(eigs, dtype=float)
-        v = np.where(np.isfinite(v), v, 0.0)
-        v = np.maximum(v, 0.0)  # guard against tiny negatives from numerics
-        v_sorted = np.sort(v)[::-1]
-        idx = np.arange(1, len(v_sorted) + 1)
-
-        # Cumulative energy
-        total = float(v_sorted.sum())
-        cum = np.cumsum(v_sorted) / total if total > 0 else None
-
-        # Diagnostics
-        vmax = float(np.max(v_sorted)) if v_sorted.size else 0.0
-        vpos = v_sorted[v_sorted > 0]
-        vmin_pos = float(np.min(vpos)) if vpos.size else 0.0
-        cond = float(vmax / vmin_pos) if vmin_pos > 0 else float("inf")
-        eff_rank = int(np.searchsorted(cum, 0.99) + 1) if cum is not None else 0
-
-        # Plot
-        fig, ax1 = plt.subplots(figsize=(7, 4.5))
-        ax1.semilogy(
-            idx,
-            v_sorted,
-            marker="o",
-            color="black",
-            markerfacecolor="lime",
-            markeredgecolor="black",
-            linewidth=1.5,
-            label="kernel eigenval",
-        )
-        ax1.set_xlim(np.min(idx), np.max(idx))
-
-        ax1.set_xlabel("Eigenvalue index (sorted)")
-        ax1.set_ylabel("Eigenvalue")
-
-        # Cumulative on twin axis
-        if cum is not None:
-            ax2 = ax1.twinx()
-            ax2.plot(
-                idx,
-                cum,
-                linestyle="--",
-                linewidth=1.2,
-                color="black",
-                label="cumulative energy",
-            )
-            ax2.set_ylim(0, 1.02)
-            ax2.set_ylabel("Cumulative fraction")
-
-            # Mark effective rank at 99%
-            ax2.axhline(0.99, linestyle=":", linewidth=1.0, color="grey")
-            ax2.axvline(eff_rank, linestyle=":", linewidth=1.0, color="grey")
-
-        # Text box with diagnostics
-        txt = [
-            f"n = {len(v_sorted)}",
-            f"spectral condition num = {cond:.2e}" if np.isfinite(cond) else "cond=∞",
-            f"eff. rank@99% = {eff_rank}" if cum is not None else "eff. rank@99%=/",
-            f"trace(K) = {total:.3g}",
-        ]
-        ax1.text(
-            0.02,
-            0.02,
-            "\n".join(txt),
-            transform=ax1.transAxes,
-            ha="left",
-            va="bottom",
-            fontsize=8,
-            bbox=dict(boxstyle="round", facecolor="white", alpha=0.7, linewidth=0.5),
-        )
-
-        # Legend handling
-        lines, labels = ax1.get_legend_handles_labels()
-        if cum is not None:
-            l2, lab2 = ax2.get_legend_handles_labels()
-            lines += l2
-            labels += lab2
-        if lines:
-            ax1.legend(
-                lines,
-                labels,
-                title=f"Iter {self._best_iter}",
-                loc="best",
-                fontsize=8,
-                title_fontsize=8,
-            )
-
-        fig.tight_layout()
-        fig.savefig(self.run_dir / "07_kernel_eigs.png", dpi=150)
         plt.close(fig)
 
     def _retrieve_spatial_filter(self, f: int, iter: int) -> np.array:
@@ -2454,63 +2381,52 @@ class GPClassificationRunner:
         else:
             return
 
-    def _plot_confusion_matrix(self, iter: Optional[int] = None) -> None:
+    def _plot_confusion_matrix(self) -> None:
         """
         Plot confusion matrix for all the available sets
         P(y=1) > self.pred_threshold
-        If `iter` is provided use that specific iteration, otherwise use the `best` iteration
         """
+        
+        y, y_pred = self._get_best_predictions(split='train')
+        cm     = [confusion_matrix(y, y_pred)]
+        label  = ["train"]
+        ks     = 1
 
-        if iter is None:
-            iter = self._best_iter
-            self._plot_confusion_matrix(iter=iter)
+        if self.has_val:
+            y, y_pred = self._get_best_predictions(split='val')
+            cm.append(confusion_matrix(y, y_pred))
+            label.append("val")
+            ks += 1
 
-        else:
-            iter_idx = iter - 1
+        if self.has_test:
+            y, y_pred = self._get_best_predictions(split='test')
+            cm.append(confusion_matrix(y, y_pred))
+            label.append("test")
+            ks += 1
 
-            y = self.Y_train.ravel().astype(int)
-            y_pred = np.array(self.run_log.y_train_seq[iter_idx]).ravel()
-            cm = [confusion_matrix(y, y_pred)]
-            label = ["train"]
-            ks = 1
+        # Plot
+        fig, axes = plt.subplots(1, ks, figsize=(4 * ks, 4))
+        if ks == 1:
+            axes = [axes]
 
-            if self.has_val:
-                y = self.Y_val.ravel().astype(int)
-                y_pred = np.array(self.run_log.y_val_seq[iter_idx]).ravel()
-                cm.append(confusion_matrix(y, y_pred))
-                label.append("val")
-                ks += 1
+        # Plot each provided weight vector as a topomap
+        for k in range(ks):
+            vmax = cm[k].max()
+            axes[k].imshow(cm[k], cmap="Greens", vmin=0, vmax=vmax)
+            if k == 0:
+                axes[k].set_title(f"{label[k]} (Iter {iter})", fontsize=9)
+            else:
+                axes[k].set_title(f"{label[k]}", fontsize=9)
+            axes[k].set_xlabel(
+                f"Predicted P(y=1) > {self.pred_threshold}", fontsize=9
+            )
+            axes[k].set_ylabel("True", fontsize=9)
+            for (i, j), v in np.ndenumerate(cm[k]):
+                axes[k].text(j, i, int(v), ha="center", va="center", fontsize=9)
 
-            if self.has_test:
-                y = self.Y_test.ravel().astype(int)
-                y_pred = np.array(self.run_log.y_test_seq[iter_idx]).ravel()
-                cm.append(confusion_matrix(y, y_pred))
-                label.append("test")
-                ks += 1
-
-            # Plot
-            fig, axes = plt.subplots(1, ks, figsize=(4 * ks, 4))
-            if ks == 1:
-                axes = [axes]
-
-            # Plot each provided weight vector as a topomap
-            for k in range(ks):
-                vmax = cm[k].max()
-                axes[k].imshow(cm[k], cmap="Greens", vmin=0, vmax=vmax)
-                if k == 0:
-                    axes[k].set_title(f"{label[k]} (Iter {iter})", fontsize=9)
-                else:
-                    axes[k].set_title(f"{label[k]}", fontsize=9)
-                axes[k].set_xlabel(
-                    f"Predicted P(y=1) > {self.pred_threshold}", fontsize=9
-                )
-                axes[k].set_ylabel("True", fontsize=9)
-                for (i, j), v in np.ndenumerate(cm[k]):
-                    axes[k].text(j, i, int(v), ha="center", va="center", fontsize=9)
-
-            fig.tight_layout()
-            fig.savefig(self.run_dir / "09_confusion_matrix.png", dpi=150)
-            plt.close(fig)
+        fig.tight_layout()
+        fig.savefig(self.run_dir / "09_confusion_matrix.png", dpi=150)
+        plt.close(fig)
 
     def _compute_feature(self, f: int, iter: int) -> Dict[str, np.ndarray]:
         """
@@ -2566,7 +2482,7 @@ class GPClassificationRunner:
 
     def _compute_decision_boundary(self, iter: int) -> Dict[str, Any]:
         """
-        Build a 2D decision surface in the selected feature-pair space using interpolation from predicted probabilties
+        Build a 2D decision surface over a two-feature space using interpolation from predicted probabilties
         on the train set P(y=1) at iteration `iter`
 
         Feature-pair selection:
@@ -2584,11 +2500,7 @@ class GPClassificationRunner:
         iter_idx = int(iter) - 1
 
         # Choose feature pair
-        f1, f2 = getattr(self, "feature_pair", (0, 1))
-        f1 = int(np.clip(int(f1), 0, int(self.nf) - 1))
-        f2 = int(np.clip(int(f2), 0, int(self.nf) - 1))
-        if f1 == f2 and int(self.nf) > 1:
-            f2 = (f1 + 1) % int(self.nf)
+        f1, f2 = 0, 1
 
         # Compute features for the given pair
         fX_dict = self._compute_feature(f=f1, iter=iter)
@@ -2611,10 +2523,11 @@ class GPClassificationRunner:
         XX, YY = np.meshgrid(x_lin, y_lin)
 
         # Train predicted probabilities at `iter`
-        p = np.asarray(self.run_log.p_train_seq[iter_idx], dtype=float).ravel()
+        y, p = self._get_best_probabilities(split='train')
 
-        # Interpolate P(y=1) onto the grid
+        # Concatenate along the second axis
         pts = np.c_[fX, fY]
+        # Interpolate P(y=1) onto the grid
         try:
             ZZ = griddata(points=pts, values=p, xi=(XX, YY), method="cubic")
         except Exception:
@@ -2683,129 +2596,124 @@ class GPClassificationRunner:
                 XX, YY, ZZ, levels=other, linewidths=1.0, colors="grey", linestyles="--"
             )
 
-    def _plot_features_and_boundary(self, iter: Optional[int] = None) -> None:
+    def _plot_features_and_boundary(self) -> None:
         """
         Scatter the selected feature pair for train / val / test and overlay the decision boundary
         Feature pair is read from `self.feature_pair` if present; otherwise defaults to (0, 1)
-
-        TODO: when more than 2 features are generated, the boundary decision projection to a pair's plane is bad
-
+        Only when 2 filter columns are required the boundary is shown
         """
-        # Define iteration, if not provided use self._best_iter
-        if iter is None:
-            iter = self._best_iter
-            self._plot_features_and_boundary(iter)
-        else:
-            boundary = self._compute_decision_boundary(iter=iter)
-            if not boundary:
-                return
+        # Define iteration using self._best_iter
+        iter = self._best_iter
+        boundary = self._compute_decision_boundary(iter=iter)
+        if not boundary:
+            return
 
-            f1, f2 = boundary["f1"], boundary["f2"]
-            fX_train, fY_train = boundary["fX_train"], boundary["fY_train"]
-            fX_val, fY_val = boundary.get("fX_val"), boundary.get("fY_val")
-            fX_test, fY_test = boundary.get("fX_test"), boundary.get("fY_test")
+        f1, f2 = boundary["f1"], boundary["f2"]
+        fX_train, fY_train = boundary["fX_train"], boundary["fY_train"]
+        # fX_val, fY_val = boundary.get("fX_val"), boundary.get("fY_val")
+        fX_test, fY_test = boundary.get("fX_test"), boundary.get("fY_test")
 
-            fig, ax = plt.subplots(figsize=(6, 5))
+        fig, ax = plt.subplots(figsize=(6, 5))
 
-            # Train points
-            if fX_train is not None and fY_train is not None:
-                ax.scatter(
-                    fX_train,
-                    fY_train,
-                    c=["orange" if y == 0 else "navy" for y in self.Y_train.ravel()],
-                    s=44,
+        # Train points
+        if fX_train is not None and fY_train is not None:
+            ax.scatter(
+                fX_train,
+                fY_train,
+                c=["orange" if y == 0 else "navy" for y in self.Y_train.ravel()],
+                s=44,
+                marker="o",
+                linewidth=0.4,
+                alpha=0.2,
+                # label="train",
+            )
+            handles = [
+                plt.Line2D(
+                    [0],
+                    [0],
                     marker="o",
-                    linewidth=0.4,
-                    alpha=0.2,
-                    # label="train",
-                )
-                handles = [
-                    plt.Line2D(
-                        [0],
-                        [0],
-                        marker="o",
-                        color="w",
-                        markerfacecolor="k",
-                        markersize=8,
-                        alpha=0.2,
-                        label="Train",
-                    )
-                ]
-
-            # Validation points
-            """
-            if self.has_val and fX_val is not None and fY_val is not None:
-                ax.scatter(
-                    fX_val,
-                    fY_val,
-                    c=["orange" if y == 0 else "navy" for y in self.Y_val.ravel()],
-                    s=28,
-                    marker="s",
-                    linewidth=0.4,
-                    alpha=0.7,
-                    #label="val",
-                )
-                handles.append(plt.Line2D(
-                    [0],
-                    [0],
-                    marker="s",
                     color="w",
                     markerfacecolor="k",
                     markersize=8,
-                    alpha=0.7,
-                    label="Val",
-                ))
-            """
+                    alpha=0.2,
+                    label="Train",
+                )
+            ]
 
-            # Test points
-            if self.has_test and fX_test is not None and fY_test is not None:
-                ax.scatter(
-                    fX_test,
-                    fY_test,
-                    c=["orange" if y == 0 else "navy" for y in self.Y_test.ravel()],
-                    s=22,
+        # Validation points
+        """
+        if self.has_val and fX_val is not None and fY_val is not None:
+            ax.scatter(
+                fX_val,
+                fY_val,
+                c=["orange" if y == 0 else "navy" for y in self.Y_val.ravel()],
+                s=28,
+                marker="s",
+                linewidth=0.4,
+                alpha=0.7,
+                #label="val",
+            )
+            handles.append(plt.Line2D(
+                [0],
+                [0],
+                marker="s",
+                color="w",
+                markerfacecolor="k",
+                markersize=8,
+                alpha=0.7,
+                label="Val",
+            ))
+        """
+
+        # Test points
+        if self.has_test and fX_test is not None and fY_test is not None:
+            ax.scatter(
+                fX_test,
+                fY_test,
+                c=["orange" if y == 0 else "navy" for y in self.Y_test.ravel()],
+                s=22,
+                marker="^",
+                linewidth=0.4,
+                alpha=1,
+                # label="test",
+            )
+            handles.append(
+                plt.Line2D(
+                    [0],
+                    [0],
                     marker="^",
-                    linewidth=0.4,
+                    color="w",
+                    markerfacecolor="k",
+                    markersize=6,
                     alpha=1,
-                    # label="test",
+                    label="Test",
                 )
-                handles.append(
-                    plt.Line2D(
-                        [0],
-                        [0],
-                        marker="^",
-                        color="w",
-                        markerfacecolor="k",
-                        markersize=6,
-                        alpha=1,
-                        label="Test",
-                    )
-                )
-
-            # Overlay boundary
-            self._add_decision_boundary(
-                iter=iter, levels=[self.pred_threshold, 0.1, 0.9]
             )
 
-            # Labels and aesthetics
-            x_label = rf"$w_{f1}^T \Sigma w_{f1}$"
-            y_label = rf"$w_{f2}^T \Sigma w_{f2}$"
-            x_label = (
-                f"log({x_label})" if getattr(self, "logged_flag", False) else x_label
-            )
-            y_label = (
-                f"log({y_label})" if getattr(self, "logged_flag", False) else y_label
-            )
-            ax.set_xlabel(x_label)
-            ax.set_ylabel(y_label)
-            ax.set_title(f"Iter {iter}", fontsize=9)
-            ax.legend(handles=handles, loc="best", fontsize=8, frameon=True)
-            fig.tight_layout()
-            fig.savefig(
-                self.run_dir / f"10_features_and_boundary_{self.feature_pair}.png",
-                dpi=150,
-            )
-            plt.close(fig)
+        # Overlay boundary
+        self._add_decision_boundary(
+            iter=iter, levels=[self.pred_threshold, 0.1, 0.9]
+        )
+
+        # Labels and aesthetics
+        x_label = rf"$w_{f1}^T \Sigma w_{f1}$"
+        y_label = rf"$w_{f2}^T \Sigma w_{f2}$"
+        x_label = (
+            f"log({x_label})" if getattr(self, "logged_flag", False) else x_label
+        )
+        y_label = (
+            f"log({y_label})" if getattr(self, "logged_flag", False) else y_label
+        )
+        ax.set_xlabel(x_label)
+        ax.set_ylabel(y_label)
+        ax.set_title(f"Iter {iter}", fontsize=9)
+        ax.legend(handles=handles, loc="best", fontsize=8, frameon=True)
+        fig.tight_layout()
+        fig.savefig(
+            self.run_dir / f"10_features_and_boundary_{self.feature_pair}.png",
+            dpi=150,
+        )
+        plt.close(fig)
 
     def _get_posterior_q(self) -> Optional[Dict[str, Any]]:
         """
@@ -3010,7 +2918,6 @@ class GPClassificationRunner:
         cond = float(vmax / vmin_pos) if vmin_pos > 0 else float("inf")
         eff_rank = int(np.searchsorted(cum, 0.99) + 1) if total > 0 else 0
 
-        # Plot: match the style of _plot_kernel_eigs()
         fig, ax1 = plt.subplots(figsize=(7, 4.5))
         ax1.semilogy(
             idxs,
@@ -3179,62 +3086,3 @@ class GPClassificationRunner:
             fig.tight_layout()
             fig.savefig(self.run_dir / "16_singular_values.png", dpi=150)
             plt.close(fig)
-
-    def _plot_sv_evolution(self) -> None:
-        """
-        Plot singular values over the iterations in a raster plot-like visualization
-        A box over the plot highlights the `best` iteration
-        """
-
-        mat_iter = np.zeros((self.nf, self.maxiter))
-
-        for iter in range(int(self.maxiter)):
-            mat = self._compute_features_matrix(iter=iter)
-            try:
-                s = self._compute_svd(mat)  # full dimension
-                s = np.sort(s)[::-1]  # sort descending for nicer visual
-            except:
-                s = np.array([np.nan] * self.nf)
-            mat_iter[:, iter] = s
-
-        fig, ax = plt.subplots(figsize=(7, 4.5))
-        im = ax.imshow(
-            mat_iter,
-            aspect="auto",
-            origin="lower",
-            interpolation="nearest",
-            cmap="plasma",
-        )
-        cbar = plt.colorbar(im, ax=ax, vmin=0)
-        ax.set_xlabel("Iter")
-        ax.set_ylabel("Singular values")
-        Lylim = self.nf - 0.5
-        ax.set_xlim(-0.5, self.maxiter - 0.5)
-        ax.set_ylim(-0.5, Lylim)
-        # Box around best column
-        from matplotlib.patches import Rectangle
-
-        rect = Rectangle(
-            (self._best_iter - 0.5, -0.5),
-            1.0,
-            self.nf,
-            fill=False,
-            linewidth=2.0,
-            edgecolor="red",
-        )
-        ax.add_patch(rect)
-        # Arrow + label
-        ax.annotate(
-            f"best @ iter {self._best_iter}",
-            xy=(self._best_iter, self.nf + 0.1),
-            xytext=(self._best_iter, self.nf + 0.8),
-            ha="center",
-            arrowprops=dict(arrowstyle="->", lw=1.5, color="red"),
-            color="red",
-            fontsize=9,
-        )
-
-        ax.grid(False)
-        fig.tight_layout()
-        fig.savefig(self.run_dir / "17_singular_values_raster.png", dpi=150)
-        plt.close(fig)

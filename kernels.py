@@ -90,6 +90,12 @@ class CustomKernel(gpflow.kernels.Kernel):
         Sigma = to_default_float(Sigma)
         if Sigma.dtype != self.W.dtype:
             Sigma = tf.cast(Sigma, self.W.dtype)
+        
+        # These changes might help in case of Cholesky decomposition problematics
+        # if matrix is not symmetric --> Symmetrize (this is very slow)
+        # Sigma = 0.5*(Sigma + tf.transpose(Sigma, perm=[0,2,1]))
+        # if matrix is getting values at 0 --> Tiny ridge on diagonal
+        # Sigma = Sigma + tf.eye(self.s, dtype=Sigma.dtype)[None, :, :] * 1e-12
 
         # Applies Σi @ w for each i with i being trial number
         # This step performs the operation for each spatial filter column of index p
@@ -117,8 +123,9 @@ class CustomKernel(gpflow.kernels.Kernel):
         wSw = tf.matmul(Sigma_flat, W_flat)  # [N, nf]
         """
         if self._flag_logged:
-            # Log the resulting features
-            wSw = tf.math.log(wSw)
+            # Log the resulting features with guard for 0 values
+            eps = tf.cast(1e-12, wSw.dtype)
+            wSw = tf.math.log(tf.maximum(wSw, eps))
             # In case of numerical stability
             # Note here: the covariance matrices in input should not be given in V^2
             # That entails a very low order of magnitude ~1e-12/1e-14 which is way lower than 1e-7 which is added for numerical stability
