@@ -29,6 +29,8 @@ class CustomKernel(gpflow.kernels.Kernel):
         self.s = W.shape[0]  # Number of sensors
         self.nf = W.shape[1]  # Number of spatial filters, cols of W
 
+        self.W_trainable = W_trainable
+
         # Define flags as for input
         self._flag_ard = ard_flag  # Individual feature scaling
         self._flag_eta = eta_flag  # Global scaling
@@ -38,7 +40,7 @@ class CustomKernel(gpflow.kernels.Kernel):
         # GPflow parameter
         # Spatial filter matrix
         # W has shape [s, nf], and its p column is called w
-        self.W = gpflow.Parameter(W, trainable=W_trainable)
+        self.W = gpflow.Parameter(W, trainable=self.W_trainable)
 
         # Automatic Relevance Detection (ARD) determines scaling of each feature independently
         # Initialize parameter at 1.0, allows constrained representation forcing it to be positive
@@ -86,22 +88,16 @@ class CustomKernel(gpflow.kernels.Kernel):
         #   N: number of trials
         #   s: number of sensors
 
-        # Ensure dtype consistency with GPflow default float and params
-        Sigma = to_default_float(Sigma)
+        Sigma = to_default_float(Sigma) # Ensure dtype consistency with GPflow default float and params
+        
         if Sigma.dtype != self.W.dtype:
             Sigma = tf.cast(Sigma, self.W.dtype)
-        
-        # These changes might help in case of Cholesky decomposition problematics
-        # if matrix is not symmetric --> Symmetrize (this is very slow)
-        # Sigma = 0.5*(Sigma + tf.transpose(Sigma, perm=[0,2,1]))
-        # if matrix is getting values at 0 --> Tiny ridge on diagonal
-        # Sigma = Sigma + tf.eye(self.s, dtype=Sigma.dtype)[None, :, :] * 1e-12
 
         # Applies Σi @ w for each i with i being trial number
         # This step performs the operation for each spatial filter column of index p
         # Sigma has shape [N, s, s]
         # self.W has shape [s, nf]
-        Sw = tf.matmul(Sigma, self.W)  # [N, s, nf]
+        Sw = tf.matmul(Sigma, self.W) # [N, s, nf]
         # Applies w @ Σi @ w for each i with i being trial number
         # Sw has shape [N, s, nf]
         # self.W[None, :, :] has shape [1, s, nf]
