@@ -1,4 +1,6 @@
 """
+GP classification with a custom kernel in GPflow using Variational approximation on covariance matrices
+
 DATA SHAPES (core)
 ------------------
 Let:
@@ -52,7 +54,6 @@ from typing import (
     Any,
     Callable,
     Dict,
-    Iterable,
     List,
     Optional,
     Tuple,
@@ -81,13 +82,6 @@ from scipy.sparse.linalg import svds
 from kernels import CustomKernel  # custom covariance function
 
 # ---------------------- Third party libraries (optionals for extra glitters) ----------------------
-try:
-    import imageio.v2 as imageio  # handles GIF creation; accepts in-memory numpy frames
-
-    HAS_IMAGEIO = True
-except Exception:
-    HAS_IMAGEIO = False
-
 try:
     import mne  # handles EEG specific objects like montage
     from mne.channels import make_dig_montage
@@ -243,9 +237,7 @@ class GPClassificationRunner:
         self.X = X
         self.Y = Y
         self.dataset_label = dataset_label
-        self.ch_names = [
-            c.lower() for c in ch_names
-        ]  # enforce lower-case for channel lookup
+        self.ch_names = [c.lower() for c in ch_names]  # enforce lower-case for channel lookup
         self.ch_xy = {k.lower(): v for k, v in ch_xy.items()}
 
         if HAS_MNE:
@@ -281,8 +273,8 @@ class GPClassificationRunner:
 
         # Store Run naming / Logging
         self.results_root = Path(results_dir)
-        self.run_name     = run_name or f"run_{_now_stamp()}"
-        self.run_dir      = self.results_root / self.run_name
+        self.run_name = run_name or f"run_{_now_stamp()}"
+        self.run_dir = self.results_root / self.run_name
         _ensure_dir(self.run_dir)  # Create folder
 
         # Placeholders updated by `_load_and_prepare_data`
@@ -2238,7 +2230,7 @@ class GPClassificationRunner:
             fig.savefig(self.run_dir / "05_kernel_parameters.png", dpi=150)
             plt.close(fig)
 
-    def _plot_kernel_W(self) -> None:
+    def _plot_kernel_W_old(self) -> None:
         """
         Plot kernel spatial filter weights and their evolution over the iterations, one plot per spatial filter
         self.nf provides the number of spatial filters that have been created
@@ -2261,6 +2253,96 @@ class GPClassificationRunner:
             ax[k].set_xlabel("Iteration")
             ax[k].set_ylabel(f"W[:,{k}]")
             ax[k].set_xlim(0, self.maxiter)
+        fig.tight_layout()
+        fig.savefig(self.run_dir / "06_kernel_W.png", dpi=150)
+        plt.close(fig)
+
+    def _plot_kernel_W(self) -> None:
+        """
+        Plot kernel spatial filter weights and their evolution over iterations.
+        Works with both a single spatial filter (nf == 1) and multiple filters (nf >= 2).
+
+        Expected shapes per iteration log:
+        - l.W is (s, nf) or a list-of-lists equivalent.
+        - steps is a list/array of length T == number of logs.
+        """
+        # --- Basic validation ----------------------------------------------------
+        if getattr(self, "run_log", None) is None or not getattr(self.run_log, "logs", []):
+            return  # Nothing to plot. Actions have consequences.
+
+        logs = self.run_log.logs
+        steps = np.asarray([getattr(l, "step", i + 1) for i, l in enumerate(logs)], dtype=float)
+        T = steps.size
+
+        # --- Normalize W across iterations into (T, s, nf) ----------------------
+        Ws_list = []
+        for l in logs:
+            W = np.asarray(l.W, dtype=float)  # tolerate list-of-lists
+            # Accept (s, nf) or (s,) if nf == 1
+            if W.ndim == 1:
+                # Treat as (s,) for single filter. Expand to (s, 1).
+                if getattr(self, "nf", 1) == 1 and W.size == getattr(self, "s", W.size):
+                    W = W.reshape(-1, 1)
+                else:
+                    # If this is malformed, skip this iteration.
+                    W = np.full((getattr(self, "s", 1), getattr(self, "nf", 1)), np.nan)
+            elif W.ndim != 2:
+                W = np.full((getattr(self, "s", 1), getattr(self, "nf", 1)), np.nan)
+
+            s_expected = getattr(self, "s", W.shape[0])
+            nf_expected = getattr(self, "nf", W.shape[1])
+
+            # Fix channel dimension if off by trivial reshape
+            if W.shape[0] != s_expected and W.size == s_expected * nf_expected:
+                W = W.reshape(s_expected, nf_expected)
+
+            # Slice or pad filter dimension to nf_expected
+            if W.shape[1] >= nf_expected:
+                W = W[:, :nf_expected]
+            else:
+                pad = np.full((W.shape[0], nf_expected - W.shape[1]), np.nan)
+                W = np.concatenate([W, pad], axis=1)
+
+            # Slice or pad channel dimension to s_expected
+            if W.shape[0] >= s_expected:
+                W = W[:s_expected, :]
+            else:
+                pad = np.full((s_expected - W.shape[0], W.shape[1]), np.nan)
+                W = np.concatenate([W, pad], axis=0)
+
+            Ws_list.append(W)
+
+        # Stack to (T, s, nf)
+        Ws = np.stack(Ws_list, axis=0).astype(float)
+        s, nf = Ws.shape[1], Ws.shape[2]
+        if nf == 0 or T == 0:
+            return
+
+        # --- Create axes that behave for nf == 1 and nf > 1 ----------------------
+        fig_width = max(5, int(5 * nf))  # don’t make a postage stamp
+        fig, axes = plt.subplots(1, nf, figsize=(fig_width, 4))
+        if nf == 1:
+            axes = [axes]  # make it indexable like an array
+
+        # --- Plot: each panel k shows all s channel traces for that filter -------
+        for k in range(nf):
+            ax = axes[k]
+            # Plot s lines, one per channel, across iterations
+            # Ws[:, ch, k] is the ch-th channel’s weight trajectory for filter k
+            ax.plot(steps, Ws[:, :, k], linewidth=1.2, alpha=0.9)
+            ax.set_xlabel("Iteration")
+            ax.set_ylabel(f"W[:, {k}]")
+            # Be a tiny bit robust if maxiter is missing or silly
+            xmax = float(getattr(self, "maxiter", steps.max() if T else 1))
+            ax.set_xlim(steps.min() if T else 0.0, xmax)
+            ax.grid(True, linewidth=0.4, alpha=0.3)
+
+            # Optional: show a faint median to anchor the spaghetti
+            with np.errstate(invalid="ignore"):
+                med = np.nanmedian(Ws[:, :, k], axis=1)
+            ax.plot(steps, med, linewidth=2.0)  # default color, thicker line
+            ax.set_title(f"Filter {k}")
+
         fig.tight_layout()
         fig.savefig(self.run_dir / "06_kernel_W.png", dpi=150)
         plt.close(fig)
@@ -2414,7 +2496,7 @@ class GPClassificationRunner:
             vmax = cm[k].max()
             axes[k].imshow(cm[k], cmap="Greens", vmin=0, vmax=vmax)
             if k == 0:
-                axes[k].set_title(f"{label[k]} (Iter {iter})", fontsize=9)
+                axes[k].set_title(f"{label[k]} (Iter {self._best_iter})", fontsize=9)
             else:
                 axes[k].set_title(f"{label[k]}", fontsize=9)
             axes[k].set_xlabel(

@@ -18,38 +18,38 @@ with open(f"./data/{path_to_file}", "rb") as f:
 
 
 # Consider train fraction from entire dataset, no validation, the remaining is test
-train_splits = [0.7, 0.9, 0.5, 0.3, 0.1]
+train_splits = [0.7] # [0.7, 0.9, 0.5, 0.3, 0.1]
 
 # Consider random states for random-influenced events
 # - Initialization of W matrix if `spatialFilter_init` is set to `random`
 # - train/test split if arrays are passed instead of dictionaries
-spatialFilter_init = "random"
-random_states = [0, 11, 22, 33, 44, 55]
+spatialFilter_init = "focused"
+random_states = [0] # [0, 11, 22, 33, 44, 55]
 
 # Number of spatial filters to consider
-nfs = [2]  # [2, 4, 8, 12, 16, 20, 30]
+nfs = [1, 2]  # [2, 4, 8, 12, 16, 20, 30]
 
 for train_split in train_splits:
-    # Fix train and test split to be trained over many times
-    # This train / test split is fixed, given the same train fraction the data in train will always be the same
-    X_train, X_test, Y_train, Y_test = train_test_split(
-        data["X"], data["Y"], train_size=train_split, random_state=2
-    )
+    for random_state in random_states:
+        # Fix train and test split by a given random_state
+        # This train / test split is fixed, given the same train fraction the data in train will always be the same
+        X_train, X_test, Y_train, Y_test = train_test_split(
+            data["X"], data["Y"], train_size=train_split, random_state=random_state
+        )
 
-    # Generate dictionary
-    my_dict = {
-        "X": {
-            "train": X_train,
-            "test": X_test,
-        },
-        "Y": {
-            "train": Y_train,
-            "test": Y_test,
-        },
-    }
+        # Generate dictionary
+        my_dict = {
+            "X": {
+                "train": X_train,
+                "test": X_test,
+            },
+            "Y": {
+                "train": Y_train,
+                "test": Y_test,
+            },
+        }
 
-    for nf in nfs:
-        for random_state in random_states:
+        for nf in nfs:
             runner = GPClassificationRunner(
                 # Input variables
                 X=my_dict["X"],
@@ -69,7 +69,7 @@ for train_split in train_splits:
                 # Training
                 learning_rate=0.1,  # Adam default learning rate
                 gamma=0.1,  # Natural gradient default learning rate
-                maxiter=1800,
+                maxiter=100,
                 pred_threshold=0.5,  # decision boundary in binary classification p(y=1) >= pred_threshold
                 random_state=random_state,
                 # ----- Policy flags for adaptation / early stopping

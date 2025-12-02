@@ -12,8 +12,8 @@ from collections import defaultdict
 
 
 # ---- Input root directory ----
-root = "/mnt/c/Users/scana/Desktop/gpc/results/data_set_IVa_aa/seed_random"
-# root = "/mnt/c/Users/scana/Desktop/gpc/results/data_set_IVa_aa/seed_focused"
+root = "/mnt/c/Users/scana/Desktop/gpc/results/gpflow/data_set_IVa_aa/seed_random"
+# root = "/mnt/c/Users/scana/Desktop/gpc/results/gpflow/data_set_IVa_aa/seed_focused"
 
 # ---- Buckets to store results ----
 splits = []  # float(X.Y)
