@@ -1,3 +1,41 @@
+"""
+Singular Value Decomposition helper for whitening and alignment utilities.
+
+Overview
+--------
+This module exposes a single public class, ``SingularValueDecomposition``,
+which wraps ``numpy.linalg.svd`` and lazily computes a rich set of derived
+quantities (pseudo-inverse, matrix square root, whitener, etc.).
+
+It is used internally by ``Whitening.SpatialWhiteningDecomposition`` to:
+
+- Decompose sensor covariance matrices for whitening (ZCA / PCA-style).
+- Handle rank-deficient inputs via a configurable tolerance threshold and
+  an optional hard ``maxRank`` ceiling.
+- Provide stable matrix square roots and inverse square roots needed by CSP
+  and SSA spatial filter computations.
+
+All derived properties are computed on demand and cached so that repeated
+access does not trigger redundant computation.
+
+Public API
+----------
+``SingularValueDecomposition(A, maxRank=None, tol='auto', keepCopy=True, hermitian=False)``
+    Decompose ``A`` and expose: ``U``, ``s``, ``V``, ``r`` (effective rank),
+    ``pinv``, ``sqrtm``, ``isqrtm``, ``whitener``, ``reconstruction``, and more.
+    See the class docstring for the full property list.
+
+Notes
+-----
+- All properties follow the convention  ``A = U @ diag(s) @ V.H``  where
+  ``U`` and ``V`` are orthonormal and ``s`` contains singular values in
+  descending order.
+- Setting ``hermitian=True`` delegates to the faster ``numpy.linalg.eigh``
+  path internally; use this only when ``A`` is genuinely symmetric/Hermitian.
+- The tolerance ``tol`` scales with ``max(A.shape) * eps(A.dtype)`` by default,
+  which is consistent with MATLAB's ``rank`` and ``pinv`` conventions.
+"""
+
 __all__ = [
 	'SingularValueDecomposition',
 ]
