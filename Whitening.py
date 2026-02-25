@@ -1,6 +1,65 @@
 #!/usr/bin/env -s python3
 """
-TODO: module doc
+Spatial whitening, CSP/SSA filter computation, and covariance utilities.
+
+Overview
+--------
+This module is the core linear-algebra layer for EEG spatial filtering in
+this package.  It is used by the experiment runner
+(``run_class_bci_competition_III_merged_spatial_filters_gpy.py``) to:
+
+1. **Compute sensor covariance matrices** from multi-trial epoch arrays via
+   ``Covariance``.
+2. **Apply spatial filters** (CSP, SSA, or arbitrary matrices) to EEG
+   epochs via ``ApplySpatialFilters``.
+3. **Whiten sensor covariances** and derive optimal spatial filters
+   through the ``SpatialWhiteningDecomposition`` class, which exposes:
+
+   - ``Whiten``   — PCA/ZCA-style whitening of the sensor covariance.
+   - ``Rayleigh`` — Rayleigh-quotient maximisation to obtain CSP-style
+                   filters ordered by discriminability.
+   - ``SSA``      — Stationary Subspace Analysis to identify components
+                   whose statistics are stable across epochs.
+
+Public API
+----------
+``ApplySpatialFilters(signal, spatialFilteringMatrix, sensorAxis=1)``
+    Apply a spatial filter matrix to an array of signals using einsum.
+    Handles 2-D ``(samples, channels)`` and 3-D ``(epochs, channels, samples)``
+    inputs uniformly by referencing the sensor axis symbolically.
+
+``Covariance(x, preservedAxis=-1)``
+    Compute the unnormalised outer-product covariance along one axis of ``x``.
+    Accepts raw NumPy arrays or MNE objects transparently.
+
+``Check(x, against=None, name='')``
+    Sanity-check helper: returns the maximum absolute deviation between ``x``
+    and a reference matrix (default ``eye``).  Used for unit-test assertions
+    and debugging whitening pipelines.
+
+``SpatialWhiteningDecomposition(mixedSignals=None, sensorCovariance=None, ...)``
+    Main class.  Accepts either raw epoch data or a pre-computed covariance
+    matrix and provides whitening, CSP, and SSA decompositions.  All spatial
+    filter matrices are stored as ``W`` (columns = filters) and ``A`` (columns =
+    patterns / activations).
+
+Dependencies
+------------
+- ``SVD.SingularValueDecomposition`` (local module)
+- NumPy
+- MNE (optional; enables ``DataFromMNE`` / ``MontageFromMNE`` helpers and
+  ``DataToMNE`` export)
+- ``BCI2000Tools`` (optional; enables richer container types and
+  electrode-coordinate lookup)
+
+Notes
+-----
+- The module can also be run directly as a script for quick diagnostics on
+  a BCI2000 data file (see ``if __name__ == '__main__'`` block and the
+  argparse help).
+- Internal conventions follow the notation used in the BCI2000 / cEPOCS
+  codebase: ``P`` = whitening matrix, ``R`` = rotation matrix,
+  ``W = P @ R`` = combined spatial filter, ``A = Sigma @ W`` = spatial pattern.
 """
 
 __all__ = [
