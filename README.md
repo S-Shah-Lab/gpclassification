@@ -1,6 +1,6 @@
-# GP-BCI: Gaussian Process Classification for EEG Motor Imagery
+# Gaussian Process Classification for Spatial Filter Learning
 
-A Python toolkit for decoding motor-imagery EEG signals using **Gaussian Process (GP) classification** with jointly-optimised spatial filters.  The pipeline covers everything from raw covariance-feature extraction through cross-validated training and evaluation, with a rich set of diagnostic plots saved automatically per fold.
+A Python toolkit for decoding EEG signals using **Gaussian Process (GP) classification** with jointly-optimised spatial filters.  The pipeline covers everything from raw covariance-feature extraction through cross-validated training and evaluation, with a rich set of diagnostic plots saved automatically per fold.
 
 ---
 
