@@ -6,26 +6,26 @@ Overview
 This module provides ``GPClassificationRunner``, the central class that
 orchestrates the full training pipeline:
 
-  1. Data preparation — accepts either pre-split dicts or flat arrays;
+  1. Data preparation -- accepts either pre-split dicts or flat arrays;
      flattens covariance matrices from ``(N, s, s)`` to ``(N, s²)``.
-  2. Spatial-filter initialisation — supports random, constant, or a
+  2. Spatial-filter initialisation -- supports random, constant, or a
      user-supplied ``(s, nf)`` NumPy array (e.g. from CSP).
-  3. Model construction — builds a ``GPy.models.GPClassification`` instance
+  3. Model construction -- builds a ``GPy.models.GPClassification`` instance
      with the custom ``CustomKernelGPy`` covariance function.
-  4. Multi-stage optimisation — each stage is described by an
+  4. Multi-stage optimisation -- each stage is described by an
      ``OptimizerStage`` dataclass that specifies the GPy optimizer name,
      number of steps, and optional optimizer-specific keyword arguments
      (learning rate, momentum, …).  A sensible single-stage default is
      provided; advanced users supply a list of stages.
-  5. Best-checkpoint tracking — the model state (``param_array``) and the
+  5. Best-checkpoint tracking -- the model state (``param_array``) and the
      predicted probabilities at the iteration with the lowest chosen metric
      (NLML or validation NLPD) are recorded and restored after training.
-  6. Early stopping — patience-based: training halts when the tracked metric
+  6. Early stopping -- patience-based: training halts when the tracked metric
      has not improved by at least ``es_min_delta`` for ``es_patience``
      consecutive iterations.
-  7. Logging — per-iteration metrics, kernel snapshots, and final predictions
+  7. Logging -- per-iteration metrics, kernel snapshots, and final predictions
      are serialised to ``run_log.json`` in the output directory.
-  8. Visual summaries — PNG plots for learning curves, threshold sweeps,
+  8. Visual summaries -- PNG plots for learning curves, threshold sweeps,
      calibration, kernel parameters, topomaps, confusion matrix, feature
      scatter + decision boundary, and singular values.
 
@@ -100,13 +100,13 @@ class OptimizerStage:
     optimizer : str
         GPy optimizer identifier.  Supported values:
 
-        - ``"scg"``     — Scaled Conjugate Gradient (default GPy optimizer;
+        - ``"scg"``     -- Scaled Conjugate Gradient (default GPy optimizer;
                           good general-purpose choice, no learning-rate knob).
-        - ``"lbfgsb"``  — L-BFGS-B via ``scipy.optimize``; often converges
+        - ``"lbfgsb"``  -- L-BFGS-B via ``scipy.optimize``; often converges
                           faster in the early phase but can overshoot.
         - ``"adadelta"``— Adaptive learning-rate gradient descent;
                           accepts ``learning_rate`` and ``momentum`` kwargs.
-        - ``"rprop"``   — Resilient back-propagation; robust to gradient
+        - ``"rprop"``   -- Resilient back-propagation; robust to gradient
                           scale differences.
     max_iters : int
         Number of optimisation steps to run in this stage.
@@ -117,20 +117,20 @@ class OptimizerStage:
 
         The available kwargs depend on which optimizer is selected:
 
-        - ``"scg"`` / ``"lbfgsb"`` — accept convergence tolerances:
+        - ``"scg"`` / ``"lbfgsb"`` -- accept convergence tolerances:
           ``xtol``, ``ftol``, ``gtol``.  **No learning rate.**
           SCG determines its own step length via curvature estimation
           (internal parameter ``sigma0 = 1e-7``); it cannot be overridden
           by the user.
 
-        - ``"adadelta"`` — accepts ``step_rate`` (learning rate),
+        - ``"adadelta"`` -- accepts ``step_rate`` (learning rate),
           ``decay``, ``momentum``.
           Backed by ``climin.adadelta.Adadelta``.
 
-        - ``"rprop"`` — accepts ``step_rate`` (initial step size).
+        - ``"rprop"`` -- accepts ``step_rate`` (initial step size).
           Backed by the climin RProp implementation.
 
-        - ``"adam"`` — accepts ``step_rate``, ``decay``,
+        - ``"adam"`` -- accepts ``step_rate``, ``decay``,
           ``decay_mom1``, ``decay_mom2``, ``momentum``, ``offset``.
           Backed by ``climin.adam.Adam``.
 
@@ -162,6 +162,7 @@ class OptimizerStage:
     """
     optimizer  : str  = "scg"
     max_iters  : int  = 300
+    log_every  : int  = 10
     kwargs     : dict = field(default_factory=dict)
 
 
@@ -282,9 +283,9 @@ class GPClassificationRunner:
     spatialFilter_init : str or np.ndarray
         How to initialise the spatial filter matrix ``W ∈ R^{s × nf}``:
 
-        - ``"random"``   — i.i.d. Gaussian ``N(0, 1)`` samples.
-        - ``"ones"``     — all-ones matrix.
-        - ``np.ndarray`` — shape ``(s, nf)`` matrix provided directly
+        - ``"random"``   -- i.i.d. Gaussian ``N(0, 1)`` samples.
+        - ``"ones"``     -- all-ones matrix.
+        - ``np.ndarray`` -- shape ``(s, nf)`` matrix provided directly
                            (e.g. CSP filters).  Acts as a seed when
                            ``W_trainable=True`` or as a fixed filter
                            when ``W_trainable=False``.
@@ -308,8 +309,11 @@ class GPClassificationRunner:
         schedule when ``optimizer_stages`` is ``None``.  Ignored when
         ``optimizer_stages`` is provided explicitly.
     es_patience : int
-        Early-stopping patience: number of consecutive iterations without
-        improvement before training is halted.  Set to ``0`` to disable.
+        Early-stopping patience: number of consecutive **optimisation steps**
+        without improvement before training is halted.  Set to ``0`` to
+        disable.  Internally converted to blocks via
+        ``ceil(es_patience / log_every)`` so the effective tolerance in steps
+        is always consistent regardless of ``log_every``.
     es_min_delta : float
         Minimum absolute improvement in the tracked metric to reset the
         patience counter.
@@ -401,10 +405,11 @@ class GPClassificationRunner:
         # ------------------------------------------------------------------ #
         self.es_patience  = int(es_patience)
         self.es_min_delta = float(es_min_delta)
-        # Runtime counters — reset at the start of _train
-        self._es_counter : int   = 0
-        self._es_best    : float = float("inf")
-        self._es_stopped : bool  = False
+        # Runtime counters -- reset at the start of _train
+        self._es_counter         : int   = 0
+        self._es_best            : float = float("inf")
+        self._es_stopped         : bool  = False
+        self._es_patience_blocks : int   = 0   # derived per-stage from es_patience / log_every
 
         # ------------------------------------------------------------------ #
         # Inference / split config                                             #
@@ -423,7 +428,7 @@ class GPClassificationRunner:
         _ensure_dir(self.run_dir)
 
         # ------------------------------------------------------------------ #
-        # Placeholders — populated by setup methods                           #
+        # Placeholders -- populated by setup methods                           #
         # ------------------------------------------------------------------ #
         self.has_train = False
         self.has_val   = False
@@ -505,9 +510,9 @@ class GPClassificationRunner:
         RESET  = "\033[0m"
         if which == "start":
             print(f"[RUN START] {_now_stamp(mode='nice')}")
-            print(f"{GREEN}{self.run_name}_nf{self.nf}{RESET}\n")
+            print(f"{GREEN}{self.run_name}_nf{self.nf}{RESET}")
         elif which == "end":
-            print(YELLOW + f"[RUN END] {_now_stamp(mode='nice')}" + RESET)
+            print(YELLOW + f"[RUN END] {_now_stamp(mode='nice')}" + RESET + "\n\n")
 
     def _create_config_file(self) -> None:
         """
@@ -545,7 +550,7 @@ class GPClassificationRunner:
             # Optimisation
             "optimizer_stages" : stages_repr,
             "maxiter_total"    : self.maxiter,
-            "es_patience"      : self.es_patience,
+            "es_patience_steps" : self.es_patience,
             "es_min_delta"     : self.es_min_delta,
             # Inference
             "pred_threshold" : self.pred_threshold,
@@ -605,20 +610,20 @@ class GPClassificationRunner:
 
         Handles two input modes:
 
-        **Dict mode** — ``self.X`` is a ``dict`` with at least a ``"train"``
+        **Dict mode** -- ``self.X`` is a ``dict`` with at least a ``"train"``
         key.  ``"val"`` and ``"test"`` are optional.  Each value must be an
         array of shape ``(N, s, s)``; it is flattened to ``(N, s²)``.
 
-        **Array mode** — ``self.X`` is a single array ``(N, s, s)`` that is
+        **Array mode** -- ``self.X`` is a single array ``(N, s, s)`` that is
         split into train/val/test according to ``self.frac_val`` and
         ``self.frac_test``.
 
         After this method, the following attributes are set:
 
-        - ``self.X_train``, ``self.Y_train`` — always present.
-        - ``self.X_val``,   ``self.Y_val``   — ``None`` when no val split.
-        - ``self.X_test``,  ``self.Y_test``  — ``None`` when no test split.
-        - ``self.s``        — number of EEG sensors.
+        - ``self.X_train``, ``self.Y_train`` -- always present.
+        - ``self.X_val``,   ``self.Y_val``   -- ``None`` when no val split.
+        - ``self.X_test``,  ``self.Y_test``  -- ``None`` when no test split.
+        - ``self.s``        -- number of EEG sensors.
         - ``self.N_train``, ``self.N_val``, ``self.N_test``
         - ``self.has_train``, ``self.has_val``, ``self.has_test``
         """
@@ -706,9 +711,9 @@ class GPClassificationRunner:
 
         Accepts either a string policy or a pre-computed NumPy array:
 
-        - ``"random"``     — i.i.d. Gaussian samples from ``N(0, 1)``.
-        - ``"ones"``       — all-ones matrix.
-        - ``np.ndarray``   — shape ``(s, nf)`` array copied directly.
+        - ``"random"``     -- i.i.d. Gaussian samples from ``N(0, 1)``.
+        - ``"ones"``       -- all-ones matrix.
+        - ``np.ndarray``   -- shape ``(s, nf)`` array copied directly.
         """
         rng = np.random.default_rng(self.random_state)
 
@@ -782,69 +787,122 @@ class GPClassificationRunner:
         """
         Run the multi-stage optimisation loop with optional early stopping.
 
-        For each ``OptimizerStage`` in ``self.optimizer_stages`` the method
-        iterates ``stage.max_iters`` times, calling
-        ``model.optimize(optimizer, max_iters=1, **stage.kwargs)`` per step.
-        This fine-grained per-step loop is necessary to capture per-iteration
-        metrics, snapshots, and to support early stopping.
+        For each ``OptimizerStage``, the optimizer is called in blocks of
+        ``stage.log_every`` steps rather than one step at a time.  This is
+        critical for performance: calling ``model.optimize(max_iters=1)``
+        N times forces EP to re-initialise its site parameters on every
+        call (``on_optimization_start``), whereas calling
+        ``model.optimize(max_iters=log_every)`` N/log_every times pays that
+        cost only once per block.  For typical EP on ~100 samples this
+        reduces wall-clock time by 5–20×.
+
+        Metrics (NLML, accuracy, Brier score) are logged once per block,
+        at the end of each block.  The ``step`` counter increments by
+        ``log_every`` per log entry, not by 1.
+
+        Early stopping is specified in **steps** (``self.es_patience``).  At
+        the start of each stage it is converted to blocks via
+        ``ceil(es_patience / log_every)`` and stored in
+        ``self._es_patience_blocks``.  This keeps the patience threshold
+        consistent in step-space regardless of ``log_every``.
 
         After all stages (or early stopping), the best checkpoint is restored.
         """
         self.logs: List[IterLog] = []
-        print_freq = max(1, self.maxiter // 10)
 
         # Reset early-stopping state
-        self._es_counter = 0
-        self._es_best    = float("inf")
-        self._es_stopped = False
+        self._es_counter         = 0
+        self._es_best            = float("inf")
+        self._es_stopped         = False
+        self._es_patience_blocks = 0   # set per-stage below
 
-        self.step = 0  # global step counter across all stages
+        self.step = 0  # global step counter (increments by log_every per block)
+        total_blocks = sum(
+            max(1, s.max_iters // s.log_every) for s in self.optimizer_stages
+        )
+        print_freq  = max(1, total_blocks // 10)
+        block_count = 0  # counts blocks across all stages (for print_freq)
 
         for stage_idx, stage in enumerate(self.optimizer_stages):
             if self._es_stopped:
-                break  # honour early stopping across stage boundaries
+                break
+
+            log_every   = max(1, stage.log_every)
+            n_blocks    = max(1, stage.max_iters // log_every)
+            remainder   = stage.max_iters - n_blocks * log_every  # leftover steps
+
+            # Convert step-based patience to blocks for this stage's log_every.
+            # ceil ensures we never stop *earlier* than the user-specified step count.
+            self._es_patience_blocks = (
+                max(1, math.ceil(self.es_patience / log_every))
+                if self.es_patience > 0 else 0
+            )
 
             print(
                 f"  [Stage {stage_idx + 1}/{len(self.optimizer_stages)}] "
-                f"optimizer={stage.optimizer}  max_iters={stage.max_iters}"
+                f"optimizer={stage.optimizer}  max_iters={stage.max_iters}  "
+                f"log_every={log_every}"
+                + (
+                    f"  es_patience={self.es_patience} steps "
+                    f"({self._es_patience_blocks} blocks)"
+                    if self.es_patience > 0 else ""
+                )
                 + (f"  kwargs={stage.kwargs}" if stage.kwargs else "")
             )
 
-            for _ in range(stage.max_iters):
-                # One optimisation step
+            for block_i in range(n_blocks):
+                # Run log_every steps in one optimize call -- EP re-inits only once
                 self.model.optimize(
-                    optimizer  = stage.optimizer,
-                    messages   = False,
-                    max_iters  = 1,
+                    optimizer = stage.optimizer,
+                    messages  = False,
+                    max_iters = log_every,
                     **stage.kwargs,
                 )
-                self.step += 1
+                self.step   += log_every
+                block_count += 1
 
-                # Predict on all available splits
+                # Predict and log once per block
                 p_train = self._predict_prob(self.X_train)
-                p_val   = self._predict_prob(self.X_val)   if self.has_val  else None
-                p_test  = self._predict_prob(self.X_test)  if self.has_test else None
+                p_val   = self._predict_prob(self.X_val)  if self.has_val  else None
+                p_test  = self._predict_prob(self.X_test) if self.has_test else None
 
-                # Snapshot metrics and kernel state
                 self._snapshot_iteration(p_train, p_val, p_test)
-
-                # Track best checkpoint
                 self._check_for_best_iteration(p_train, p_val, p_test)
 
-                # Terminal progress
-                if self.step % print_freq == 0 or self.step == 1:
+                if block_count % print_freq == 0 or block_count == 1:
                     self._print_state_on_terminal()
 
-                # Early stopping check
                 if self.es_patience > 0:
                     self._check_for_early_stopping()
                     if self._es_stopped:
                         print(
                             f"  [EarlyStopping] Triggered at step {self.step} "
-                            f"(patience={self.es_patience}, "
+                            f"(patience={self.es_patience} steps = "
+                            f"{self._es_patience_blocks} blocks at log_every={log_every}, "
                             f"min_delta={self.es_min_delta})"
                         )
                         break
+
+            # Run any leftover steps that didn't fill a complete block
+            if remainder > 0 and not self._es_stopped:
+                self.model.optimize(
+                    optimizer = stage.optimizer,
+                    messages  = False,
+                    max_iters = remainder,
+                    **stage.kwargs,
+                )
+                self.step   += remainder
+                block_count += 1
+
+                p_train = self._predict_prob(self.X_train)
+                p_val   = self._predict_prob(self.X_val)  if self.has_val  else None
+                p_test  = self._predict_prob(self.X_test) if self.has_test else None
+
+                self._snapshot_iteration(p_train, p_val, p_test)
+                self._check_for_best_iteration(p_train, p_val, p_test)
+
+                if self.es_patience > 0:
+                    self._check_for_early_stopping()
 
         # Restore best checkpoint
         if self._best_params is not None:
@@ -1068,7 +1126,14 @@ class GPClassificationRunner:
 
     def _check_for_early_stopping(self) -> None:
         """
-        Increment or reset the patience counter based on metric improvement.
+        Check whether early stopping should fire after the current block.
+
+        ``self.es_patience`` is specified in **steps** by the user.  It is
+        converted to blocks at the start of each stage and stored in
+        ``self._es_patience_blocks``.  The counter ``self._es_counter``
+        increments by one per block (not per step), so comparing it against
+        ``_es_patience_blocks`` keeps the effective tolerance consistent in
+        step-space.
 
         Sets ``self._es_stopped = True`` when the patience limit is reached.
         The metric used is the same as the model-selection metric
@@ -1089,7 +1154,7 @@ class GPClassificationRunner:
             self._es_counter = 0
         else:
             self._es_counter += 1
-            if self._es_counter >= self.es_patience:
+            if self._es_counter >= self._es_patience_blocks:
                 self._es_stopped = True
 
     def _print_state_on_terminal(self) -> None:
@@ -1151,8 +1216,8 @@ class GPClassificationRunner:
         Returns
         -------
         y_true : np.ndarray, shape (N,)
-        p_best : np.ndarray, shape (N,)   — probabilities at best iteration
-        y_best : np.ndarray, shape (N,)   — predicted labels at best iteration
+        p_best : np.ndarray, shape (N,)   -- probabilities at best iteration
+        y_best : np.ndarray, shape (N,)   -- predicted labels at best iteration
         """
         if split == "train":
             y_true = np.asarray(self.Y_train).ravel()
@@ -1193,17 +1258,17 @@ class GPClassificationRunner:
         """
         Generate all PNG diagnostic plots and save them to ``self.run_dir``.
 
-        Plots produced:
+        Plots produced (saved to self.run_dir):
 
-        - ``01_learning_curves.png``   — NLML + accuracy over iterations
-        - ``02_threshold_sweep.png``   — ROC, PR, and metric-vs-threshold
-        - ``03_calibration_curve.png`` — reliability diagrams
-        - ``05_kernel_parameters.png`` — eta and ARD trajectories
-        - ``06_kernel_W.png``          — spatial filter weight trajectories
-        - ``08_topomaps.png``          — topomap of best-iteration filters (MNE only)
-        - ``09_confusion_matrix.png``  — confusion matrices for each split
-        - ``10_features_and_boundary_*.png`` — 2D feature scatter + boundary (nf==2 only)
-        - ``16_singular_values.png``   — singular values of the feature matrix
+        - plot_01_learning_curves.png   -- NLML + accuracy over iterations
+        - plot_02_threshold_sweep.png   -- ROC, PR, and metric-vs-threshold
+        - plot_03_calibration_curve.png -- reliability diagrams
+        - plot_05_kernel_parameters.png -- eta and ARD trajectories
+        - plot_06_kernel_W.png          -- spatial filter weight trajectories
+        - plot_08_topomaps.png          -- topomap of best-iteration filters (MNE only)
+        - plot_09_confusion_matrix.png  -- confusion matrices for each split
+        - plot_10_features_and_boundary_NxM.png -- 2D feature scatter + boundary (nf==2 only)
+        - plot_16_singular_values.png   -- singular values of the feature matrix
         """
         self.colors = {"train": "dodgerblue", "val": "forestgreen", "test": "orangered"}
 
@@ -1636,6 +1701,36 @@ class GPClassificationRunner:
     # Topomap
     # -----------------------------------------------------------------------
 
+    def _step_to_log_idx(self, step: int) -> int:
+        """
+        Map an absolute step number to the index of the closest log entry.
+
+        Because logs are written once per block (every ``log_every`` steps),
+        the step values stored in ``self.run_log.logs`` are multiples of
+        ``log_every`` (e.g. 10, 20, 30, …) rather than consecutive integers.
+        A direct ``step - 1`` offset therefore gives the wrong index.
+
+        This helper finds the log entry whose ``step`` field is closest to
+        the requested value, falling back to the last entry on out-of-range
+        inputs.
+
+        Parameters
+        ----------
+        step : int
+            Absolute step number (as stored in ``IterLog.step``).
+
+        Returns
+        -------
+        int
+            Index into ``self.run_log.logs``.
+        """
+        if self.run_log is None or not self.run_log.logs:
+            return 0
+        steps = [l.step for l in self.run_log.logs]
+        # Find the index of the entry whose step is closest to the requested value
+        idx = int(np.argmin(np.abs(np.array(steps) - step)))
+        return idx
+
     def _retrieve_spatial_filter(self, f: int, iter: int) -> np.ndarray:
         """
         Retrieve a single spatial filter column from the logged W matrices.
@@ -1645,7 +1740,8 @@ class GPClassificationRunner:
         f : int
             Filter index (column of W).
         iter : int
-            Iteration number (1-indexed).
+            Step number (as stored in ``IterLog.step``), not a 1-based count
+            of log entries.  Use ``self._best_iter`` to get the best snapshot.
 
         Returns
         -------
@@ -1654,9 +1750,9 @@ class GPClassificationRunner:
         if self.run_log is None or not self.run_log.logs:
             return np.zeros(self.s, dtype=float)
 
-        Ws      = np.array([l.W for l in self.run_log.logs])  # (T, s, nf)
-        idx     = int(iter) - 1
-        if not (0 <= idx < Ws.shape[0] and 0 <= f < Ws.shape[2]):
+        Ws  = np.array([l.W for l in self.run_log.logs])   # (T, s, nf)
+        idx = self._step_to_log_idx(iter)
+        if not (0 <= f < Ws.shape[2]):
             return np.zeros(self.s, dtype=float)
         return Ws[idx, :, f]
 
@@ -1774,7 +1870,7 @@ class GPClassificationRunner:
         -------
         dict with keys ``"train"``, optionally ``"val"`` and ``"test"``.
         """
-        iter_idx = iter - 1
+        iter_idx = self._step_to_log_idx(iter)
         w        = self._retrieve_spatial_filter(f=f, iter=iter).astype(float).ravel()
 
         def _on_split(X_flat):
@@ -1994,7 +2090,7 @@ class GPClassificationRunner:
         ax.set_xlim(xs.min() - 0.5, xs.max() + 0.5)
         ax.set_xlabel("Index")
         ax.set_ylabel("Singular value")
-        ax.set_title(f"Feature matrix singular values — Iter {iter}", fontsize=9)
+        ax.set_title(f"Feature matrix singular values -- Iter {iter}", fontsize=9)
         fig.tight_layout()
         fig.savefig(self.run_dir / "16_singular_values.png", dpi=150)
         plt.close(fig)

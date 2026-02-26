@@ -240,7 +240,6 @@ def generate_train_test_from_fold(
         {"train": y[train_idx].astype(int), "test": y[test_idx].astype(int)},
     )
 
-
 # ===========================================================================
 # Diagnostic fold plots
 # ===========================================================================
@@ -534,14 +533,23 @@ def _parse_optimizer_stages(stage_strings: List[str]) -> List[OptimizerStage]:
     """
     Parse optimizer stage strings into ``OptimizerStage`` objects.
 
-    Format: ``"<name>:<max_iters>"`` or
-    ``"<name>:<max_iters>:<learning_rate>:<momentum>"``.
+    Format:
+        ``"<n>:<max_iters>"``
+        ``"<n>:<max_iters>:<log_every>"``
+        ``"<n>:<max_iters>:<log_every>:<step_rate>"``
+        ``"<n>:<max_iters>:<log_every>:<step_rate>:<momentum>"``
+
+    ``log_every`` controls how many optimizer steps are batched into one
+    ``model.optimize()`` call (i.e. per EP re-initialisation and per log
+    entry).  Larger values are faster; smaller values give finer-grained
+    early-stopping checks.  Defaults to 10 when omitted.
 
     Examples::
 
-        "lbfgsb:50"
-        "scg:250"
-        "adadelta:400:0.01:0.9"
+        "scg:300"                  -> SCG, 300 steps, log every 10
+        "scg:300:10"               -> same, explicit
+        "lbfgsb:50:5"              -> L-BFGS-B, 50 steps, log every 5
+        "adadelta:400:20:0.01:0.9" -> Adadelta, 400 steps, log every 20
     """
     stages = []
     for s in stage_strings:
@@ -549,16 +557,22 @@ def _parse_optimizer_stages(stage_strings: List[str]) -> List[OptimizerStage]:
         if len(parts) < 2:
             raise ValueError(
                 f"Invalid optimizer stage '{s}'. "
-                "Expected format: 'name:max_iters' or 'name:max_iters:lr:momentum'."
+                "Expected format: 'name:max_iters[:log_every[:step_rate[:momentum]]]'."
             )
         name      = parts[0]
         max_iters = int(parts[1])
+        log_every = int(parts[2]) if len(parts) >= 3 else 10
         kwargs: dict = {}
-        if len(parts) >= 3:
-            kwargs["step_rate"] = float(parts[2])   # climin's name for learning rate
         if len(parts) >= 4:
-            kwargs["momentum"] = float(parts[3])
-        stages.append(OptimizerStage(optimizer=name, max_iters=max_iters, kwargs=kwargs))
+            kwargs["step_rate"] = float(parts[3])
+        if len(parts) >= 5:
+            kwargs["momentum"] = float(parts[4])
+        stages.append(OptimizerStage(
+            optimizer = name,
+            max_iters = max_iters,
+            log_every = log_every,
+            kwargs    = kwargs,
+        ))
     return stages
 
 
@@ -617,8 +631,11 @@ def build_argparser() -> argparse.ArgumentParser:
         nargs="+",
         default=None,
         help=(
-            "Multi-stage optimizer schedule as 'name:max_iters[:lr[:momentum]]'. "
-            "Example: --optimizer-stages lbfgsb:50 scg:250. "
+            "Multi-stage optimizer schedule. "
+            "Format: 'name:max_iters[:log_every[:step_rate[:momentum]]]'. "
+            "'log_every' is the number of optimizer steps per block (default 10); "
+            "larger values are faster because EP re-initialises only once per block. "
+            "Example: --optimizer-stages 'lbfgsb:50:5' 'scg:300:10'. "
             "If omitted, a single SCG stage of --maxiter steps is used."
         ),
     )
