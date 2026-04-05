@@ -219,7 +219,7 @@ def DataToMNE( signal, samplesPerSecond, channels=None, sensorAxis=1, epochAxis=
 	if signal.ndim == 2:
 		if epochAxis is not None: raise ValueError( 'for 2-D data, epochAxis must be None' )
 		signal = numpy.asarray( signal, dtype=float ).swapaxes( 0, sensorAxis )
-		return mne.io.RawArray( data, info )
+		return mne.io.RawArray( signal, info )
 	if signal.ndim == 3:
 		if epochAxis is None: epochAxis = 0; # raise ValueError( 'for 3-D data, epochAxis cannot be None' )
 		if epochAxis  < 0: epochAxis  += signal.ndim
@@ -241,7 +241,6 @@ def DataToMNE( signal, samplesPerSecond, channels=None, sensorAxis=1, epochAxis=
 			event_id = labelNames,
 			tmin = -abs( lookBackMsec / 1000.0 ),
 		)
-		raise NotImplementedError
 		
 def DataFromMNE( mneObject, picks=( 'eeg', 'meg' ) ):
 	"""
@@ -375,7 +374,7 @@ class SpatialWhiteningDecomposition( BaseClass ):
 		self.Whiten( maxRank )
 
 	def Whiten( self, maxRank=None ):
-		if maxRank in [ 'max', 'full', 'auto' ]: r = None
+		if maxRank in [ 'max', 'full', 'auto' ]: maxRank = None
 		if self.sigmaSVD is None:
 			self.sigmaSVD = SingularValueDecomposition( self.sensorCovariance, maxRank=maxRank, hermitian=True )
 		else:
@@ -450,7 +449,7 @@ class SpatialWhiteningDecomposition( BaseClass ):
 		
 		expectedShape = [ self.nSources if alreadyWhitened else self.nSensors ] * 2
 		if list( H.shape ) != expectedShape: raise ValueError( 'matrix shape is expected to be %r%s' % ( expectedShape, '' if self.nSensors == self.nSources else ' when alreadyWhitened=%r' % bool( alreadyWhitened ) ) )
-		if Check( H, H.conj().T ) > 1e-12: raise( 'matrix is expected to be %s' % ( 'symmetric' if numpy.isrealobj( H ) else 'Hermitian' ) )
+		if Check( H, H.conj().T ) > 1e-12: raise ValueError( 'matrix is expected to be %s' % ( 'symmetric' if numpy.isrealobj( H ) else 'Hermitian' ) )
 		if alreadyWhitened:
 			unwhitenedRayleighMatrix = None
 			whitenedRayleighMatrix = H
