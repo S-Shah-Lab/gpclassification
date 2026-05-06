@@ -22,8 +22,8 @@ For each subject file the script:
    file is adopted as the reference.  All subsequent files must match it
    exactly (content and order) or the script raises a ``ValueError``.
 
-3. **Bandpass-filters** the continuous EEG (8–25 Hz, 4th-order zero-phase
-   Butterworth, SOS form) and scales samples to microvolts (× 0.1).
+3. **Bandpass-filters** the continuous EEG (8-25 Hz, 4th-order zero-phase
+   Butterworth, SOS form) and scales samples to microvolts (x 0.1).
 
 4. **Extracts per-trial covariance matrices** over the global window starting
    ``initial_time_to_remove`` s after each cue onset.
@@ -43,7 +43,7 @@ Output pickle keys
     ``(N_total,)`` int64 label array; values in ``{0, 1}``.
 ``"X_eeg"``
     ``(N_total, C, T)`` float64 array of bandpass-filtered EEG epochs
-    (channels × time, in canonical order).
+    (channels x time, in canonical order).
 ``"ch_names"``
     ``(C,)`` array of lower-case channel names in canonical order.
 ``"ch_location"``
@@ -190,7 +190,7 @@ def _per_dataset_min_window_seconds(
     Compute the minimum usable post-cue window for a single recording.
 
     The available duration for each pair of consecutive cues is:
-    ``delta_t − initial_time_to_remove − final_relax_time``.
+    ``delta_t - initial_time_to_remove - final_relax_time``.
     The minimum across all pairs is returned, rounded to 0.1 s.
 
     Parameters
@@ -242,7 +242,7 @@ def _postprocess_cov(
        asymmetry introduced by ``numpy.cov``.
     2. **Unit-trace normalise**: ``C /= trace(C)``  —  removes global amplitude
        differences between trials (e.g. day-to-day power drift, impedance).
-    3. **Shrinkage**: ``C = (1 − λ) C + λ target``  —  blends the empirical
+    3. **Shrinkage**: ``C = (1 - λ) C + λ target``  —  blends the empirical
        covariance with a scaled identity to improve conditioning.  When
        ``unit_trace_flag`` is active the target is ``I / d`` (unit-trace
        identity); otherwise it is ``trace(C) / d · I``.
@@ -417,7 +417,7 @@ def main() -> None:
     # Covariance postprocessing flags
     symm_flag       = True    # symmetrise: C = 0.5 * (C + C.T)
     unit_trace_flag = False   # normalise: C /= trace(C)
-    shrink_flag     = False   # Ledoit–Wolf-style shrinkage
+    shrink_flag     = False   # Ledoit-Wolf-style shrinkage
     lambda_shrink   = 0.02    # shrinkage coefficient (ignored when shrink_flag=False)
 
     # ------------------------------------------------------------------ #

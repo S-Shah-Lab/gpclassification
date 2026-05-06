@@ -3,28 +3,28 @@ GP classification runner for EEG covariance-based motor-imagery decoding.
 
 Overview
 --------
-This module provides ``GPClassificationRunner``, the central class that
+This module provides GPClassificationRunner, the central class that
 orchestrates the full training pipeline:
 
   1. Data preparation -- accepts either pre-split dicts or flat arrays;
-     flattens covariance matrices from ``(N, s, s)`` to ``(N, s²)``.
+     flattens covariance matrices from (N, s, s) to (N, s²).
   2. Spatial-filter initialisation -- supports random, constant, or a
-     user-supplied ``(s, nf)`` NumPy array (e.g. from CSP).
-  3. Model construction -- builds a ``GPy.models.GPClassification`` instance
-     with the custom ``CustomKernelGPy`` covariance function.
+     user-supplied (s, nf) NumPy array (e.g. from CSP).
+  3. Model construction -- builds a GPy.models.GPClassification instance
+     with the custom CustomKernelGPy covariance function.
   4. Multi-stage optimisation -- each stage is described by an
-     ``OptimizerStage`` dataclass that specifies the GPy optimizer name,
+     OptimizerStage dataclass that specifies the GPy optimizer name,
      number of steps, and optional optimizer-specific keyword arguments
      (learning rate, momentum, …).  A sensible single-stage default is
      provided; advanced users supply a list of stages.
-  5. Best-checkpoint tracking -- the model state (``param_array``) and the
+  5. Best-checkpoint tracking -- the model state (param_array) and the
      predicted probabilities at the iteration with the lowest chosen metric
      (NLML or validation NLPD) are recorded and restored after training.
   6. Early stopping -- patience-based: training halts when the tracked metric
-     has not improved by at least ``es_min_delta`` for ``es_patience``
+     has not improved by at least es_min_delta for es_patience
      consecutive iterations.
   7. Logging -- per-iteration metrics, kernel snapshots, and final predictions
-     are serialised to ``run_log.json`` in the output directory.
+     are serialised to run_log.json in the output directory.
   8. Visual summaries -- PNG plots for learning curves, threshold sweeps,
      calibration, kernel parameters, topomaps, confusion matrix, feature
      scatter + decision boundary, and singular values.
@@ -32,7 +32,7 @@ orchestrates the full training pipeline:
 Dependencies
 ------------
 - GPy, NumPy, scikit-learn, SciPy, Matplotlib
-- ``kernels_gpy.CustomKernelGPy``
+- kernels_gpy.CustomKernelGPy
 - MNE (optional; required only for topomap plots)
 """
 
@@ -92,50 +92,50 @@ class OptimizerStage:
     Configuration for a single optimisation stage.
 
     A training run can consist of one or more stages executed sequentially.
-    Each stage calls ``GPy.Model.optimize`` once with ``max_iters`` steps
-    and the specified ``optimizer`` name.
+    Each stage calls GPy.Model.optimize once with max_iters steps
+    and the specified optimizer name.
 
     Parameters
     ----------
     optimizer : str
         GPy optimizer identifier.  Supported values:
 
-        - ``"scg"``     -- Scaled Conjugate Gradient (default GPy optimizer;
+        - "scg"     -- Scaled Conjugate Gradient (default GPy optimizer;
                           good general-purpose choice, no learning-rate knob).
-        - ``"lbfgsb"``  -- L-BFGS-B via ``scipy.optimize``; often converges
+        - "lbfgsb"  -- L-BFGS-B via scipy.optimize; often converges
                           faster in the early phase but can overshoot.
-        - ``"adadelta"``— Adaptive learning-rate gradient descent;
-                          accepts ``learning_rate`` and ``momentum`` kwargs.
-        - ``"rprop"``   -- Resilient back-propagation; robust to gradient
+        - "adadelta"— Adaptive learning-rate gradient descent;
+                          accepts learning_rate and momentum kwargs.
+        - "rprop"   -- Resilient back-propagation; robust to gradient
                           scale differences.
     max_iters : int
         Number of optimisation steps to run in this stage.
     kwargs : dict
         Additional keyword arguments forwarded verbatim to
-        ``GPy.Model.optimize`` (which in turn passes them to the paramz
+        GPy.Model.optimize (which in turn passes them to the paramz
         optimizer class constructor).
 
         The available kwargs depend on which optimizer is selected:
 
-        - ``"scg"`` / ``"lbfgsb"`` -- accept convergence tolerances:
-          ``xtol``, ``ftol``, ``gtol``.  **No learning rate.**
+        - "scg" / "lbfgsb" -- accept convergence tolerances:
+          xtol, ftol, gtol.  **No learning rate.**
           SCG determines its own step length via curvature estimation
-          (internal parameter ``sigma0 = 1e-7``); it cannot be overridden
+          (internal parameter sigma0 = 1e-7); it cannot be overridden
           by the user.
 
-        - ``"adadelta"`` -- accepts ``step_rate`` (learning rate),
-          ``decay``, ``momentum``.
-          Backed by ``climin.adadelta.Adadelta``.
+        - "adadelta" -- accepts step_rate (learning rate),
+          decay, momentum.
+          Backed by climin.adadelta.Adadelta.
 
-        - ``"rprop"`` -- accepts ``step_rate`` (initial step size).
+        - "rprop" -- accepts step_rate (initial step size).
           Backed by the climin RProp implementation.
 
-        - ``"adam"`` -- accepts ``step_rate``, ``decay``,
-          ``decay_mom1``, ``decay_mom2``, ``momentum``, ``offset``.
-          Backed by ``climin.adam.Adam``.
+        - "adam" -- accepts step_rate, decay,
+          decay_mom1, decay_mom2, momentum, offset.
+          Backed by climin.adam.Adam.
 
         **Important:** the keyword for the learning rate in climin-backed
-        optimizers is ``step_rate``, not ``learning_rate``.
+        optimizers is step_rate, not learning_rate.
 
     Examples
     --------
@@ -170,7 +170,7 @@ def build_default_optimizer(maxiter: int) -> List[OptimizerStage]:
     """
     Return a single-stage SCG schedule as the default optimizer list.
 
-    This matches the original behaviour of the old ``_train`` method while
+    This matches the original behaviour of the old _train method while
     remaining compatible with the new multi-stage interface.
 
     Parameters
@@ -247,7 +247,7 @@ def _now_stamp(mode: str = "") -> str:
     Parameters
     ----------
     mode : str
-        ``"nice"`` → ``"YYYY-MM-DD HH:MM:SS"``; anything else → ``"YYYYMMDD_HHMMSS"``.
+        "nice" → "YYYY-MM-DD HH:MM:SS"; anything else → "YYYYMMDD_HHMMSS".
     """
     fmt = "%Y-%m-%d %H:%M:%S" if mode == "nice" else "%Y%m%d_%H%M%S"
     return dt.datetime.now().strftime(fmt)
@@ -266,65 +266,80 @@ class GPClassificationRunner:
     X : np.ndarray or dict
         Covariance matrices.  Either:
 
-        - A dict with keys ``"train"`` (required), ``"val"`` (optional),
-          ``"test"`` (optional), each mapping to an array of shape
-          ``(N, s, s)``.
-        - A flat array of shape ``(N, s, s)`` that will be split using
-          ``frac_val`` and ``frac_test``.
+        - A dict with keys "train" (required), "val" (optional),
+          "test" (optional), each mapping to an array of shape
+          (N, s, s).
+        - A flat array of shape (N, s, s) that will be split using
+          frac_val and frac_test.
     Y : np.ndarray or dict
-        Class labels (``{0, 1}``).  Same structure as ``X``.
+        Class labels ({0, 1}).  Same structure as X.
     dataset_label : str
         Human-readable name used in output paths and config files.
-    ch_names : list of str
+    ch_names : list of str or None
         EEG channel names (used for topomap plots when MNE is available).
-    ch_xy : dict
-        Mapping ``{channel_name: (x, y)}`` of 2D electrode coordinates
-        (used for topomap plots when MNE is available).
+        Pass ``None`` when channel metadata is unavailable; topomap plots
+        will be skipped.
+    ch_xy : dict or None
+        Mapping {channel_name: (x, y)} of 2D electrode coordinates
+        (used for topomap plots when MNE is available).  Pass ``None``
+        when coordinates are unavailable.
     spatialFilter_init : str or np.ndarray
-        How to initialise the spatial filter matrix ``W ∈ R^{s × nf}``:
+        How to initialise the spatial filter matrix W ∈ R^{s × nf}:
 
-        - ``"random"``   -- i.i.d. Gaussian ``N(0, 1)`` samples.
-        - ``"ones"``     -- all-ones matrix.
-        - ``np.ndarray`` -- shape ``(s, nf)`` matrix provided directly
+        - "random"   -- i.i.d. Gaussian N(0, 1) samples.
+        - "ones"     -- all-ones matrix.
+        - np.ndarray -- shape (s, nf) matrix provided directly
                            (e.g. CSP filters).  Acts as a seed when
-                           ``W_trainable=True`` or as a fixed filter
-                           when ``W_trainable=False``.
+                           W_trainable=True or as a fixed filter
+                           when W_trainable=False.
     nf : int
-        Number of spatial filters (columns of ``W``).
+        Number of spatial filters (columns of W).
     eta_flag : bool
-        Enable/disable the global output-scale parameter ``eta``.
+        Enable/disable the global output-scale parameter eta.
     ard_flag : bool
         Enable/disable per-filter ARD scaling.
     W_trainable : bool
-        If ``False``, ``W`` is fixed at its initial value and not updated.
+        If False, W is fixed at its initial value and not updated.
     logged_flag : bool
-        If ``True``, features are log-transformed: ``z = log(w^T Σ w)``.
+        If True, features are log-transformed: z = log(w^T Σ w).
     kernel_type : str
-        ``"RBF"`` or ``"Linear"``.
+        "RBF" or "Linear".
     optimizer_stages : list of OptimizerStage, optional
-        Multi-stage optimisation schedule.  If ``None``, a single SCG stage
-        of ``maxiter`` steps is used (backward-compatible default).
+        Multi-stage optimisation schedule.  If None, a single SCG stage
+        of maxiter steps is used (backward-compatible default).
     maxiter : int
         Total iteration budget.  Used to build the default single-stage
-        schedule when ``optimizer_stages`` is ``None``.  Ignored when
-        ``optimizer_stages`` is provided explicitly.
+        schedule when optimizer_stages is None.  Ignored when
+        optimizer_stages is provided explicitly.
     es_patience : int
         Early-stopping patience: number of consecutive **optimisation steps**
-        without improvement before training is halted.  Set to ``0`` to
+        without improvement before training is halted.  Set to 0 to
         disable.  Internally converted to blocks via
-        ``ceil(es_patience / log_every)`` so the effective tolerance in steps
-        is always consistent regardless of ``log_every``.
+        ceil(es_patience / log_every) so the effective tolerance in steps
+        is always consistent regardless of log_every.
     es_min_delta : float
         Minimum absolute improvement in the tracked metric to reset the
         patience counter.
+    use_val_for_selection : bool
+        When True (default) and a validation split is present (i.e. the
+        input dict contains a "val" key, or the inner validation split
+        was carved from the training fold by generate_train_test_from_fold),
+        both model selection (best-checkpoint) and early stopping are driven
+        by the **validation NLPD** rather than the training NLML.  This
+        ensures that neither criterion has ever seen the held-out test fold
+        and that the selection metric is genuinely independent of the
+        training objective.  Set to False to force NLML-based selection
+        even when a validation set is available.
     pred_threshold : float
-        Probability threshold for binary classification (default ``0.5``).
+        Probability threshold for binary classification (default 0.5).
     random_state : int
         Seed for NumPy random number generator (W initialisation, data splits).
     frac_val : float
-        Fraction of data to hold out as validation when ``X`` is an array.
+        Fraction of data to hold out as validation when X is an array.
+        Ignored when X is a dict (the dict is used as-is).
     frac_test : float
-        Fraction of data to hold out as test when ``X`` is an array.
+        Fraction of data to hold out as test when X is an array.
+        Ignored when X is a dict.
     results_dir : str
         Root directory under which all output files are saved.
     run_name : str, optional
@@ -336,8 +351,8 @@ class GPClassificationRunner:
         X: ArrayOrDict,
         Y: ArrayOrDict,
         dataset_label: str,
-        ch_names: List[str],
-        ch_xy: Dict[str, Tuple[float, float]],
+        ch_names: Optional[List[str]],
+        ch_xy: Optional[Dict[str, Tuple[float, float]]],
         # Spatial filter
         spatialFilter_init: Union[str, np.ndarray] = "random",
         nf: int = 2,
@@ -353,6 +368,8 @@ class GPClassificationRunner:
         # Early stopping
         es_patience: int = 0,
         es_min_delta: float = 1e-4,
+        # Model / validation selection
+        use_val_for_selection: bool = True,
         # Inference
         pred_threshold: float = 0.5,
         random_state: int = 42,
@@ -370,10 +387,10 @@ class GPClassificationRunner:
         self.X = X
         self.Y = Y
         self.dataset_label = dataset_label
-        self.ch_names = [c.lower() for c in ch_names]
-        self.ch_xy    = {k.lower(): v for k, v in ch_xy.items()}
+        self.ch_names = [c.lower() for c in ch_names] if ch_names is not None else []
+        self.ch_xy    = {k.lower(): v for k, v in ch_xy.items()} if ch_xy is not None else {}
 
-        if HAS_MNE:
+        if HAS_MNE and self.ch_names and self.ch_xy:
             self.montage_info = self._build_montage_from_xy(self.ch_names, self.ch_xy)
 
         # ------------------------------------------------------------------ #
@@ -405,6 +422,10 @@ class GPClassificationRunner:
         # ------------------------------------------------------------------ #
         self.es_patience  = int(es_patience)
         self.es_min_delta = float(es_min_delta)
+        # Whether to use validation NLPD (rather than training NLML) for
+        # model selection and early stopping when a validation set exists.
+        # Automatically activated in _load_and_prepare_data when has_val=True.
+        self._use_val_for_selection: bool = bool(use_val_for_selection)
         # Runtime counters -- reset at the start of _train
         self._es_counter         : int   = 0
         self._es_best            : float = float("inf")
@@ -465,7 +486,9 @@ class GPClassificationRunner:
         self._y_val_best   : Optional[np.ndarray] = None
         self._y_test_best  : Optional[np.ndarray] = None
 
-        # Flag: when True, model-selection uses validation NLPD instead of NLML
+        # Placeholder — overwritten by _load_and_prepare_data once has_val
+        # is known.  Do not set to True here: has_val is always False at
+        # __init__ time so doing so would be meaningless.
         self.use_validation_for_adaptation: bool = False
 
     # =======================================================================
@@ -480,7 +503,7 @@ class GPClassificationRunner:
         ------
         1. Create config file (bookkeeping).
         2. Load and prepare data.
-        3. Initialise ``W``.
+        3. Initialise W.
         4. Build GPy model.
         5. Train (multi-stage optimisation + early stopping).
         6. Write run log (JSON).
@@ -516,11 +539,11 @@ class GPClassificationRunner:
 
     def _create_config_file(self) -> None:
         """
-        Populate ``self.cfg`` with the run configuration for bookkeeping.
+        Populate self.cfg with the run configuration for bookkeeping.
 
-        Called at the start of ``fit`` so the config is written before any
+        Called at the start of fit so the config is written before any
         training begins.  Data-shape entries are added later by
-        ``_load_and_prepare_data``.
+        _load_and_prepare_data.
         """
         # Serialise the optimizer schedule to plain dicts
         stages_repr = [
@@ -548,10 +571,11 @@ class GPClassificationRunner:
             "logged_flag"  : self.logged_flag,
             "kernel_type"  : self.kernel_type,
             # Optimisation
-            "optimizer_stages" : stages_repr,
-            "maxiter_total"    : self.maxiter,
-            "es_patience_steps" : self.es_patience,
-            "es_min_delta"     : self.es_min_delta,
+            "optimizer_stages"     : stages_repr,
+            "maxiter_total"        : self.maxiter,
+            "es_patience_steps"    : self.es_patience,
+            "es_min_delta"         : self.es_min_delta,
+            "use_val_for_selection": self._use_val_for_selection,
             # Inference
             "pred_threshold" : self.pred_threshold,
             "random_state"   : self.random_state,
@@ -566,16 +590,16 @@ class GPClassificationRunner:
         default_z: float = 0.0,
     ) -> "mne._fiff.meas_info.Info":
         """
-        Build an MNE ``Info`` object from 2D electrode XY coordinates.
+        Build an MNE Info object from 2D electrode XY coordinates.
 
         Parameters
         ----------
         ch_names : list of str
             Lower-case channel names.
         ch_xy : dict
-            ``{name: (x, y)}`` coordinate mapping.
+            {name: (x, y)} coordinate mapping.
         default_z : float
-            Z-coordinate assigned to all electrodes (default ``0.0``).
+            Z-coordinate assigned to all electrodes (default 0.0).
 
         Returns
         -------
@@ -606,26 +630,26 @@ class GPClassificationRunner:
 
     def _load_and_prepare_data(self) -> None:
         """
-        Ingest ``self.X`` / ``self.Y`` and populate the train/val/test arrays.
+        Ingest self.X / self.Y and populate the train/val/test arrays.
 
         Handles two input modes:
 
-        **Dict mode** -- ``self.X`` is a ``dict`` with at least a ``"train"``
-        key.  ``"val"`` and ``"test"`` are optional.  Each value must be an
-        array of shape ``(N, s, s)``; it is flattened to ``(N, s²)``.
+        **Dict mode** -- self.X is a dict with at least a "train"
+        key.  "val" and "test" are optional.  Each value must be an
+        array of shape (N, s, s); it is flattened to (N, s²).
 
-        **Array mode** -- ``self.X`` is a single array ``(N, s, s)`` that is
-        split into train/val/test according to ``self.frac_val`` and
-        ``self.frac_test``.
+        **Array mode** -- self.X is a single array (N, s, s) that is
+        split into train/val/test according to self.frac_val and
+        self.frac_test.
 
         After this method, the following attributes are set:
 
-        - ``self.X_train``, ``self.Y_train`` -- always present.
-        - ``self.X_val``,   ``self.Y_val``   -- ``None`` when no val split.
-        - ``self.X_test``,  ``self.Y_test``  -- ``None`` when no test split.
-        - ``self.s``        -- number of EEG sensors.
-        - ``self.N_train``, ``self.N_val``, ``self.N_test``
-        - ``self.has_train``, ``self.has_val``, ``self.has_test``
+        - self.X_train, self.Y_train -- always present.
+        - self.X_val,   self.Y_val   -- None when no val split.
+        - self.X_test,  self.Y_test  -- None when no test split.
+        - self.s        -- number of EEG sensors.
+        - self.N_train, self.N_val, self.N_test
+        - self.has_train, self.has_val, self.has_test
         """
 
         def _to_col(Ya: np.ndarray) -> np.ndarray:
@@ -675,6 +699,16 @@ class GPClassificationRunner:
             Yte = _to_col( self.Y["test"]) if "test" in self.Y else None
 
             _set(Xtr, Ytr, Xva, Yva, Xte, Yte)
+            # Activate val-based model selection now that has_val is known.
+            self.use_validation_for_adaptation = (
+                self._use_val_for_selection and self.has_val
+            )
+            if self.use_validation_for_adaptation:
+                print("  [Selection] Early stopping and best-model selection "
+                      "will use validation NLPD.")
+            else:
+                print("  [Selection] No validation set — using training NLML "
+                      "for early stopping and best-model selection.")
             return
 
         # ---- Array input ----
@@ -684,6 +718,9 @@ class GPClassificationRunner:
 
         if fv == 0.0 and ft == 0.0:
             _set(X_all, Y_all, None, None, None, None)
+            # use_validation_for_adaptation stays False (no val set); print status.
+            print("  [Selection] No validation set — using training NLML "
+                  "for early stopping and best-model selection.")
             return
 
         # Split off test first, then validation from the remainder
@@ -704,16 +741,25 @@ class GPClassificationRunner:
             Xtr, Ytr, Xva, Yva = X_tmp, Y_tmp, None, None
 
         _set(Xtr, Ytr, Xva, Yva, Xte, Yte)
+        self.use_validation_for_adaptation = (
+            self._use_val_for_selection and self.has_val
+        )
+        if self.use_validation_for_adaptation:
+            print("  [Selection] Early stopping and best-model selection "
+                  "will use validation NLPD.")
+        else:
+            print("  [Selection] No validation set — using training NLML "
+                  "for early stopping and best-model selection.")
 
     def _initialize_W_matrix(self) -> None:
         """
-        Initialise the spatial filter matrix ``self.W_init`` of shape ``(s, nf)``.
+        Initialise the spatial filter matrix self.W_init of shape (s, nf).
 
         Accepts either a string policy or a pre-computed NumPy array:
 
-        - ``"random"``     -- i.i.d. Gaussian samples from ``N(0, 1)``.
-        - ``"ones"``       -- all-ones matrix.
-        - ``np.ndarray``   -- shape ``(s, nf)`` array copied directly.
+        - "random"     -- i.i.d. Gaussian samples from N(0, 1).
+        - "ones"       -- all-ones matrix.
+        - np.ndarray   -- shape (s, nf) array copied directly.
         """
         rng = np.random.default_rng(self.random_state)
 
@@ -758,7 +804,7 @@ class GPClassificationRunner:
 
     def _build_model(self) -> None:
         """
-        Construct the GPy ``GPClassification`` model.
+        Construct the GPy GPClassification model.
 
         Builds the custom kernel first, then wraps it with EP inference.
         """
@@ -787,24 +833,24 @@ class GPClassificationRunner:
         """
         Run the multi-stage optimisation loop with optional early stopping.
 
-        For each ``OptimizerStage``, the optimizer is called in blocks of
-        ``stage.log_every`` steps rather than one step at a time.  This is
-        critical for performance: calling ``model.optimize(max_iters=1)``
+        For each OptimizerStage, the optimizer is called in blocks of
+        stage.log_every steps rather than one step at a time.  This is
+        critical for performance: calling model.optimize(max_iters=1)
         N times forces EP to re-initialise its site parameters on every
-        call (``on_optimization_start``), whereas calling
-        ``model.optimize(max_iters=log_every)`` N/log_every times pays that
+        call (on_optimization_start), whereas calling
+        model.optimize(max_iters=log_every) N/log_every times pays that
         cost only once per block.  For typical EP on ~100 samples this
         reduces wall-clock time by 5–20×.
 
         Metrics (NLML, accuracy, Brier score) are logged once per block,
-        at the end of each block.  The ``step`` counter increments by
-        ``log_every`` per log entry, not by 1.
+        at the end of each block.  The step counter increments by
+        log_every per log entry, not by 1.
 
-        Early stopping is specified in **steps** (``self.es_patience``).  At
+        Early stopping is specified in **steps** (self.es_patience).  At
         the start of each stage it is converted to blocks via
-        ``ceil(es_patience / log_every)`` and stored in
-        ``self._es_patience_blocks``.  This keeps the patience threshold
-        consistent in step-space regardless of ``log_every``.
+        ceil(es_patience / log_every) and stored in
+        self._es_patience_blocks.  This keeps the patience threshold
+        consistent in step-space regardless of log_every.
 
         After all stages (or early stopping), the best checkpoint is restored.
         """
@@ -954,12 +1000,12 @@ class GPClassificationRunner:
         ----------
         y_true : np.ndarray or None
         p : np.ndarray or None
-            Predicted class-1 probabilities in ``[0, 1]``.
+            Predicted class-1 probabilities in [0, 1].
 
         Returns
         -------
-        dict with keys: ``"acc"``, ``"brier"``, ``"aucroc"``, ``"aucpr"``, ``"nlpd"``.
-        All values are ``None`` if either argument is ``None``.
+        dict with keys: "acc", "brier", "aucroc", "aucpr", "nlpd".
+        All values are None if either argument is None.
         """
         metrics: Dict[str, Optional[float]] = {
             "acc"   : None,
@@ -985,7 +1031,7 @@ class GPClassificationRunner:
 
         try:
             prec, rec, _ = precision_recall_curve(y_true, p)
-            metrics["aucpr"] = float(np.trapz(rec, prec))
+            metrics["aucpr"] = float(np.trapz(prec, rec))
         except Exception:
             pass
 
@@ -1002,8 +1048,8 @@ class GPClassificationRunner:
 
         Returns
         -------
-        dict with keys ``"W"``, ``"eta"``, ``"ard"``; values are Python
-        lists / floats / ``None`` for easy JSON serialisation.
+        dict with keys "W", "eta", "ard"; values are Python
+        lists / floats / None for easy JSON serialisation.
         """
         W = eta = ard = None
         if self.kernel is not None:
@@ -1031,7 +1077,7 @@ class GPClassificationRunner:
         p_test:  Optional[np.ndarray],
     ) -> None:
         """
-        Record metrics and kernel state for the current step into ``self.logs``.
+        Record metrics and kernel state for the current step into self.logs.
 
         Parameters
         ----------
@@ -1072,8 +1118,8 @@ class GPClassificationRunner:
         """
         Choose which scalar metric drives model selection and early stopping.
 
-        Uses ``nlpd_val`` when a validation set is available and
-        ``use_validation_for_adaptation`` is ``True``; falls back to ``nlml``
+        Uses nlpd_val when a validation set is available and
+        use_validation_for_adaptation is True; falls back to nlml
         otherwise.
 
         Returns
@@ -1093,7 +1139,7 @@ class GPClassificationRunner:
         """
         Update the best-checkpoint if the current step improves the tracked metric.
 
-        Stores a copy of ``model.param_array`` and the current predicted
+        Stores a copy of model.param_array and the current predicted
         probabilities when a new best is found.
 
         Parameters
@@ -1128,19 +1174,19 @@ class GPClassificationRunner:
         """
         Check whether early stopping should fire after the current block.
 
-        ``self.es_patience`` is specified in **steps** by the user.  It is
+        self.es_patience is specified in **steps** by the user.  It is
         converted to blocks at the start of each stage and stored in
-        ``self._es_patience_blocks``.  The counter ``self._es_counter``
+        self._es_patience_blocks.  The counter self._es_counter
         increments by one per block (not per step), so comparing it against
-        ``_es_patience_blocks`` keeps the effective tolerance consistent in
+        _es_patience_blocks keeps the effective tolerance consistent in
         step-space.
 
-        Sets ``self._es_stopped = True`` when the patience limit is reached.
+        Sets self._es_stopped = True when the patience limit is reached.
         The metric used is the same as the model-selection metric
-        (``nlpd_val`` or ``nlml``).
+        (nlpd_val or nlml).
 
         A step is considered an improvement when the metric decreases by more
-        than ``self.es_min_delta`` relative to the running best.
+        than self.es_min_delta relative to the running best.
         """
         last = self.logs[-1]
         _, value = self._selection_metric(last)
@@ -1158,17 +1204,29 @@ class GPClassificationRunner:
                 self._es_stopped = True
 
     def _print_state_on_terminal(self) -> None:
-        """Print a compact one-line progress summary for the current step."""
+        """Print a compact one-line progress summary for the current step.
+
+        When an inner validation set is present the line includes both the
+        training NLML and the validation NLPD so it is easy to spot
+        divergence (rising val NLPD while NLML keeps falling) during a run.
+        """
         def _f(v):
             return f"{float(v):.3f}" if (v is not None and np.isfinite(v)) else "/"
 
         last = self.logs[-1]
         pct  = int(self.step / self.maxiter * 100)
+
+        # Build the loss part: always show NLML; add val NLPD when available
+        loss_str = f"nlml {last.nlml:.3f}"
+        if self.has_val and last.nlpd_val is not None and np.isfinite(last.nlpd_val):
+            sel = " *" if self.use_validation_for_adaptation else ""
+            loss_str += f" | nlpd_val {last.nlpd_val:.3f}{sel}"
+
         print(
             f"[{pct:3d}%] step {last.step:4d}/{self.maxiter} | "
-            f"nlml {last.nlml:.3f} | "
-            f"acc ({_f(last.acc_train)}, {_f(last.acc_val)}, {_f(last.acc_test)}) | "
-            f"brier ({_f(last.brier_train)}, {_f(last.brier_val)}, {_f(last.brier_test)})"
+            f"{loss_str} | "
+            f"acc (tr={_f(last.acc_train)}, va={_f(last.acc_val)}, te={_f(last.acc_test)}) | "
+            f"brier (tr={_f(last.brier_train)}, va={_f(last.brier_val)}, te={_f(last.brier_test)})"
         )
 
     # =======================================================================
@@ -1177,7 +1235,7 @@ class GPClassificationRunner:
 
     def _build_and_write_runlog(self) -> None:
         """
-        Assemble the ``RunLog`` dataclass and serialise it to ``run_log.json``.
+        Assemble the RunLog dataclass and serialise it to run_log.json.
 
         Only the best-iteration predictions (not per-iteration sequences) are
         stored to keep file sizes manageable.
@@ -1206,12 +1264,12 @@ class GPClassificationRunner:
 
     def _get_best_snapshot(self, split: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
-        Return ``(y_true, p_best, y_best)`` for a given data split.
+        Return (y_true, p_best, y_best) for a given data split.
 
         Parameters
         ----------
         split : str
-            One of ``"train"``, ``"val"``, ``"test"``.
+            One of "train", "val", "test".
 
         Returns
         -------
@@ -1241,12 +1299,12 @@ class GPClassificationRunner:
         return y_true, p_best, y_best
 
     def _get_best_probabilities(self, split: str) -> Tuple[np.ndarray, np.ndarray]:
-        """Return ``(y_true, p_best)`` for a split."""
+        """Return (y_true, p_best) for a split."""
         y_true, p_best, _ = self._get_best_snapshot(split)
         return y_true, p_best
 
     def _get_best_predictions(self, split: str) -> Tuple[np.ndarray, np.ndarray]:
-        """Return ``(y_true, y_pred_best)`` for a split."""
+        """Return (y_true, y_pred_best) for a split."""
         y_true, _, y_best = self._get_best_snapshot(split)
         return y_true, y_best
 
@@ -1256,11 +1314,13 @@ class GPClassificationRunner:
 
     def _make_visual_summary(self) -> None:
         """
-        Generate all PNG diagnostic plots and save them to ``self.run_dir``.
+        Generate all PNG diagnostic plots and save them to self.run_dir.
 
         Plots produced (saved to self.run_dir):
 
-        - plot_01_learning_curves.png   -- NLML + accuracy over iterations
+        - 01_learning_curves.png    -- NLML (black) + val NLPD (grey dashed,
+                                       when inner val exists) on the left axis;
+                                       per-split accuracy on the right axis.
         - plot_02_threshold_sweep.png   -- ROC, PR, and metric-vs-threshold
         - plot_03_calibration_curve.png -- reliability diagrams
         - plot_05_kernel_parameters.png -- eta and ARD trajectories
@@ -1293,32 +1353,79 @@ class GPClassificationRunner:
 
     def _plot_learning_curves(self) -> None:
         """
-        Plot NLML (left axis) and per-split accuracy (right axis) over iterations.
+        Plot training dynamics over optimisation steps.
+
+        Left axis (black / grey):
+          - NLML (solid black) — the training objective being minimised.
+          - Val NLPD (dashed grey) — the held-out validation negative log
+            predictive density used for model selection and early stopping
+            when an inner validation set is present.  Plotting it on the same
+            axis as NLML makes it easy to see when the two diverge, which is
+            the primary signal that the model is starting to overfit.
+
+        Right axis (colours):
+          - Per-split accuracy trajectories (train, val, test).
 
         A vertical dashed line marks the best iteration selected by the
-        model-selection metric.
+        model-selection metric (val NLPD when available, NLML otherwise).
+        When early stopping fired, a second vertical line marks the step at
+        which training halted.
         """
         fig, ax1 = plt.subplots(figsize=(8, 4.5))
-        steps = [l.step for l in self.run_log.logs]
-        nlml  = [l.nlml for l in self.run_log.logs]
+        steps    = [l.step for l in self.run_log.logs]
+        nlml     = [l.nlml for l in self.run_log.logs]
+        x_max    = max(steps) if steps else self.maxiter
 
-        ax1.plot(steps, nlml, linewidth=2, color="black", label="NLML")
-        ax1.set_xlabel("Iteration")
-        ax1.set_ylabel("Neg log-marginal-likelihood")
-        ax1.set_xlim(0, max(steps) if steps else self.maxiter)
+        # --- Left axis: NLML + optional val NLPD ----------------------------
+        ax1.plot(steps, nlml, linewidth=2, color="black", label="NLML (train)")
+        ax1.set_xlabel("Optimisation step")
+        ax1.set_ylabel("Neg log-marginal-likelihood / NLPD")
+        ax1.set_xlim(0, x_max)
 
-        # Mark best iteration
+        # Val NLPD — plotted only when an inner validation set exists
+        if self.has_val:
+            nlpd_val = [l.nlpd_val for l in self.run_log.logs]
+            if any(v is not None and np.isfinite(v) for v in nlpd_val):
+                ax1.plot(
+                    steps, nlpd_val,
+                    linewidth  = 1.8,
+                    color      = "dimgrey",
+                    linestyle  = "--",
+                    label      = "NLPD (val)",
+                    alpha      = 0.85,
+                )
+
+        # --- Best-iteration marker ------------------------------------------
         if self._best_iter is not None:
-            ax1.axvline(self._best_iter, color="black", linestyle="--",
-                        linewidth=1, alpha=0.5, label=f"best={self._best_iter}")
+            metric_label = getattr(self, "_best_metric_name", "metric")
+            ax1.axvline(
+                self._best_iter,
+                color     = "black",
+                linestyle = "--",
+                linewidth = 1,
+                alpha     = 0.5,
+                label     = f"best {metric_label}={self._best_iter}",
+            )
 
+        # --- Early-stopping marker ------------------------------------------
+        if self._es_stopped and steps and max(steps) < self.maxiter:
+            ax1.axvline(
+                max(steps),
+                color     = "red",
+                linestyle = ":",
+                linewidth = 1.2,
+                alpha     = 0.7,
+                label     = f"ES@{max(steps)}",
+            )
+
+        # --- Right axis: accuracy per split ---------------------------------
         ax2 = ax1.twinx()
         for split, attr in [("train", "acc_train"), ("val", "acc_val"), ("test", "acc_test")]:
             has = getattr(self, f"has_{split}", split == "train")
             if has:
                 vals = [getattr(l, attr) for l in self.run_log.logs]
                 ax2.plot(steps, vals, linewidth=1.2,
-                         color=self.colors[split], label=split)
+                         color=self.colors[split], label=f"acc {split}")
 
         ax2.set_ylim(0, 1)
         ax2.set_ylabel("Accuracy")
@@ -1519,12 +1626,12 @@ class GPClassificationRunner:
         Parameters
         ----------
         n_bins : int
-            Initial number of probability bins in ``[0, 1]``.
+            Initial number of probability bins in [0, 1].
 
         Returns
         -------
-        List of ``[split_name, mean_pred, frac_pos, brier]`` entries,
-        or ``None`` for splits that are absent.
+        List of [split_name, mean_pred, frac_pos, brier] entries,
+        or None for splits that are absent.
         """
         splits = {
             "train": True,
@@ -1615,13 +1722,18 @@ class GPClassificationRunner:
         """
         Plot eta and ARD scale trajectories over iterations.
 
-        Only produced when at least one of ``eta_flag`` or ``ard_flag`` is
-        ``True``.
+        Only produced when at least one of eta_flag or ard_flag is
+        True.  The x-axis is clipped to the actual last logged step so
+        early-stopped runs are not shown with a large blank region on the right.
+        A dashed line marks the best iteration and a dotted red line marks the
+        early-stopping trigger point when applicable.
         """
         if not (self.eta_flag or self.ard_flag):
             return
 
         steps = [l.step for l in self.run_log.logs]
+        x_max = max(steps) if steps else self.maxiter
+
         fig, ax = plt.subplots(figsize=(8, 4.5))
 
         if self.eta_flag:
@@ -1636,9 +1748,19 @@ class GPClassificationRunner:
                 ]
                 ax.plot(steps, vals, lw=2, label=f"ARD[{k}]")
 
-        ax.set_xlabel("Iteration")
+        # Mark best iteration
+        if self._best_iter is not None:
+            ax.axvline(self._best_iter, color="black", linestyle="--",
+                       linewidth=1, alpha=0.5, label=f"best={self._best_iter}")
+
+        # Mark early-stopping trigger point
+        if self._es_stopped and steps and max(steps) < self.maxiter:
+            ax.axvline(max(steps), color="red", linestyle=":",
+                       linewidth=1.2, alpha=0.7, label=f"ES@{max(steps)}")
+
+        ax.set_xlabel("Optimisation step")
         ax.set_ylabel("Hyperparameter value")
-        ax.set_xlim(0, self.maxiter)
+        ax.set_xlim(0, x_max)
         if ax.get_legend_handles_labels()[0]:
             ax.legend(ncol=2, fontsize=8)
         fig.tight_layout()
@@ -1649,9 +1771,14 @@ class GPClassificationRunner:
         """
         Plot the evolution of spatial filter weights over iterations.
 
-        One subplot per filter column; each subplot overlays all ``s`` channel
+        One subplot per filter column; each subplot overlays all s channel
         traces.  A thick line shows the per-step median across channels.
-        Handles ``nf == 1`` and ``nf > 1`` uniformly.
+        Handles nf == 1 and nf > 1 uniformly.
+
+        The x-axis right edge is the actual last logged step, not the full
+        iteration budget, so early-stopped runs do not show a blank region.
+        A dashed line marks the best iteration and a dotted red line marks the
+        early-stopping trigger point when applicable.
         """
         if not (self.run_log and self.run_log.logs):
             return
@@ -1659,6 +1786,8 @@ class GPClassificationRunner:
         logs  = self.run_log.logs
         steps = np.asarray([l.step for l in logs], dtype=float)
         T     = steps.size
+        x_min = float(steps.min()) if T else 0.0
+        x_max = float(steps.max()) if T else float(self.maxiter)
 
         # Normalise stored W values to shape (T, s, nf)
         Ws_list = []
@@ -1687,11 +1816,26 @@ class GPClassificationRunner:
             ax.plot(steps, Ws[:, :, k], lw=1.2, alpha=0.9)
             with np.errstate(invalid="ignore"):
                 ax.plot(steps, np.nanmedian(Ws[:, :, k], axis=1), lw=2.0)
-            ax.set_xlabel("Iteration")
+
+            # Mark best iteration
+            if self._best_iter is not None:
+                ax.axvline(self._best_iter, color="black", linestyle="--",
+                           linewidth=1, alpha=0.5,
+                           label=f"best={self._best_iter}" if k == 0 else None)
+
+            # Mark early-stopping trigger point
+            if self._es_stopped and T and x_max < self.maxiter:
+                ax.axvline(x_max, color="red", linestyle=":",
+                           linewidth=1.2, alpha=0.7,
+                           label=f"ES@{int(x_max)}" if k == 0 else None)
+
+            ax.set_xlabel("Optimisation step")
             ax.set_ylabel(f"W[:, {k}]")
             ax.set_title(f"Filter {k}")
-            ax.set_xlim(steps.min() if T else 0, self.maxiter)
+            ax.set_xlim(x_min, x_max)
             ax.grid(lw=0.4, alpha=0.3)
+            if k == 0 and (self._best_iter is not None or self._es_stopped):
+                ax.legend(fontsize=7)
 
         fig.tight_layout()
         fig.savefig(self.run_dir / "06_kernel_W.png", dpi=150)
@@ -1705,24 +1849,24 @@ class GPClassificationRunner:
         """
         Map an absolute step number to the index of the closest log entry.
 
-        Because logs are written once per block (every ``log_every`` steps),
-        the step values stored in ``self.run_log.logs`` are multiples of
-        ``log_every`` (e.g. 10, 20, 30, …) rather than consecutive integers.
-        A direct ``step - 1`` offset therefore gives the wrong index.
+        Because logs are written once per block (every log_every steps),
+        the step values stored in self.run_log.logs are multiples of
+        log_every (e.g. 10, 20, 30, …) rather than consecutive integers.
+        A direct step - 1 offset therefore gives the wrong index.
 
-        This helper finds the log entry whose ``step`` field is closest to
+        This helper finds the log entry whose step field is closest to
         the requested value, falling back to the last entry on out-of-range
         inputs.
 
         Parameters
         ----------
         step : int
-            Absolute step number (as stored in ``IterLog.step``).
+            Absolute step number (as stored in IterLog.step).
 
         Returns
         -------
         int
-            Index into ``self.run_log.logs``.
+            Index into self.run_log.logs.
         """
         if self.run_log is None or not self.run_log.logs:
             return 0
@@ -1740,8 +1884,8 @@ class GPClassificationRunner:
         f : int
             Filter index (column of W).
         iter : int
-            Step number (as stored in ``IterLog.step``), not a 1-based count
-            of log entries.  Use ``self._best_iter`` to get the best snapshot.
+            Step number (as stored in IterLog.step), not a 1-based count
+            of log entries.  Use self._best_iter to get the best snapshot.
 
         Returns
         -------
@@ -1765,7 +1909,7 @@ class GPClassificationRunner:
         """
         Plot spatial filter columns as EEG topomaps (requires MNE).
 
-        When called with no arguments, all ``nf`` filters at the best
+        When called with no arguments, all nf filters at the best
         iteration are plotted.  The method calls itself recursively once
         weights are resolved so the plotting code is shared.
 
@@ -1777,7 +1921,7 @@ class GPClassificationRunner:
             Pre-computed weight vectors.  If provided, plotted directly.
         fs : list of int, optional
             Filter indices to plot from a specific iteration (only when
-            ``weights`` is ``None``).
+            weights is None).
         """
         if not HAS_MNE:
             return
@@ -1817,7 +1961,7 @@ class GPClassificationRunner:
         """
         Plot confusion matrices for all available splits side by side.
 
-        The threshold ``self.pred_threshold`` is used to derive predicted
+        The threshold self.pred_threshold is used to derive predicted
         labels from the stored best-iteration probabilities.
         """
         splits = [("train", True), ("val", self.has_val), ("test", self.has_test)]
@@ -1853,7 +1997,7 @@ class GPClassificationRunner:
 
     def _compute_feature(self, f: int, iter: int) -> Dict[str, np.ndarray]:
         """
-        Compute the scalar feature ``z_f = w_f^T Σ w_f`` for all splits.
+        Compute the scalar feature z_f = w_f^T Σ w_f for all splits.
 
         Mirrors the feature computation used inside the kernel, including the
         optional log transform and ARD scaling, so the scatter plots are in
@@ -1864,11 +2008,11 @@ class GPClassificationRunner:
         f : int
             Spatial filter index.
         iter : int
-            Iteration at which to retrieve ``w_f``.
+            Iteration at which to retrieve w_f.
 
         Returns
         -------
-        dict with keys ``"train"``, optionally ``"val"`` and ``"test"``.
+        dict with keys "train", optionally "val" and "test".
         """
         iter_idx = self._step_to_log_idx(iter)
         w        = self._retrieve_spatial_filter(f=f, iter=iter).astype(float).ravel()
@@ -1909,8 +2053,8 @@ class GPClassificationRunner:
 
         Returns
         -------
-        dict with keys ``"XX"``, ``"YY"``, ``"ZZ"`` (meshgrid + surface),
-        ``"f1"``, ``"f2"`` (feature indices), and per-split raw features.
+        dict with keys "XX", "YY", "ZZ" (meshgrid + surface),
+        "f1", "f2" (feature indices), and per-split raw features.
         Returns an empty dict when the feature computation fails.
         """
         f1, f2   = 0, 1
@@ -1955,14 +2099,14 @@ class GPClassificationRunner:
         """
         Overlay contour lines of the decision surface on the current axes.
 
-        The contour at ``self.pred_threshold`` is drawn in black (thick);
+        The contour at self.pred_threshold is drawn in black (thick);
         additional levels (e.g. 0.1, 0.9) are drawn in grey dashed.
 
         Parameters
         ----------
         iter : int
         levels : list of float, optional
-            Probability levels to draw.  Defaults to ``[pred_threshold, 0.1, 0.9]``.
+            Probability levels to draw.  Defaults to [pred_threshold, 0.1, 0.9].
         """
         if levels is None:
             levels = [self.pred_threshold, 0.1, 0.9]
@@ -1991,7 +2135,7 @@ class GPClassificationRunner:
         Scatter the selected 2D feature pair for each split and overlay the
         decision boundary.
 
-        Only executed when ``self.nf == 2``.  Uses probabilities from the
+        Only executed when self.nf == 2.  Uses probabilities from the
         best iteration for the boundary interpolation.
         """
         iter     = self._best_iter
@@ -2046,7 +2190,7 @@ class GPClassificationRunner:
 
     def _compute_features_matrix(self, iter: int) -> np.ndarray:
         """
-        Stack per-filter features into a matrix of shape ``(N_train, nf)``.
+        Stack per-filter features into a matrix of shape (N_train, nf).
 
         Parameters
         ----------
@@ -2071,7 +2215,7 @@ class GPClassificationRunner:
         Parameters
         ----------
         iter : int, optional
-            Iteration to use.  Defaults to ``self._best_iter``.
+            Iteration to use.  Defaults to self._best_iter.
         """
         iter = iter if iter is not None else self._best_iter
         mat  = self._compute_features_matrix(iter=iter)

@@ -542,7 +542,7 @@ class SpatialWhiteningDecomposition( BaseClass ):
 	def CSP( self, labels, epochAxis=0, trainingSubset=None, targetLabel=None ):
 		signals = self.mixedSignals
 		labels = numpy.asarray( labels, dtype=int ).ravel()
-		if labels.size != signals.shape[ epochAxis ]: raise( 'number of labels (%d) does not match number of epochs (%d)' % ( labels.size, signals.shape[ epochAxis ] ) )
+		if labels.size != signals.shape[ epochAxis ]: raise ValueError( 'number of labels (%d) does not match number of epochs (%d)' % ( labels.size, signals.shape[ epochAxis ] ) )
 		uniqueLabels = numpy.unique( labels )
 		if len( uniqueLabels ) == 0: raise ValueError( 'no labels' ) 
 		if len( uniqueLabels ) == 1: raise ValueError( 'labels specify only one class' ) 
@@ -774,8 +774,8 @@ class SpatialWhiteningDecomposition( BaseClass ):
 			u = Select(u, trainingSubset, axis=0, keepdims=True)
 
 		N, D, T = u.shape
-		if N <= 0:
-			raise ValueError("No epochs available for SSA (after applying trainingSubset)")
+		if N <= 1:
+			raise ValueError("SSA_prl needs at least two epochs (got N=%d after applying trainingSubset)" % N)
 		if T <= 1:
 			raise ValueError("Each epoch must contain at least two time samples")
 

@@ -139,7 +139,7 @@ def _csp_filters_from_covs(
     # Trace-normalise and average within each class
     C0   = np.mean([_tr_norm(C) for C in X_cov[idx0]], axis=0)
     C1   = np.mean([_tr_norm(C) for C in X_cov[idx1]], axis=0)
-    Csum = 0.5 * (C0 + C1 + (C0 + C1).T)  # symmetrised pooled covariance
+    Csum = 0.5 * (C0 + C1)                 # pooled covariance (symmetric by construction)
     C1   = 0.5 * (C1 + C1.T)              # symmetrise class-1 covariance
 
     # Whiten w.r.t. the pooled covariance, then Rayleigh-quotient on C1
@@ -209,9 +209,30 @@ def generate_train_test_from_fold(
     train_idx: np.ndarray,
     test_idx: np.ndarray,
     alignment: Optional[str] = None,
+    frac_inner_val: float = 0.15,
+    random_state: Optional[int] = None,
 ):
     """
-    Slice a fold from the full dataset and optionally align covariances.
+    Slice a fold from the full dataset, optionally align covariances, and
+    carve a held-out inner validation set from the training fold.
+
+    Alignment procedure (when ``alignment`` is not ``None``):
+
+    1. The reference covariance ``M`` is estimated from the **full training
+       fold** (all ``train_idx`` trials) using the chosen method
+       (``"euclidean"`` or ``"riemann"``).  This maximises the statistical
+       stability of ``M`` by using as many training samples as possible.
+    2. The whitening transform ``W = M^{-1/2}`` is applied to every covariance
+       in both the training fold and the test fold.
+    3. The aligned training fold is then split into an inner training set and a
+       held-out inner validation set.  Because the split happens *after*
+       alignment, the validation set is automatically aligned with the same
+       reference ``M`` — no separate alignment step is required and no
+       information from the validation or test trials ever enters the
+       computation of ``M``.
+
+    When ``alignment`` is ``None`` (no alignment), steps 1–2 are skipped and
+    the raw covariances are split directly.
 
     Parameters
     ----------
@@ -222,22 +243,63 @@ def generate_train_test_from_fold(
     train_idx, test_idx : np.ndarray
         Integer index arrays for this fold.
     alignment : str or None
-        Passed to ``align.align_split``; ``None`` skips alignment.
+        Covariance alignment method: ``"none"`` / ``None`` skips alignment,
+        ``"euclidean"`` uses the arithmetic mean, ``"riemann"`` uses the
+        Riemannian (geometric) mean.  The reference is always estimated from
+        the training fold only.
+    frac_inner_val : float
+        Fraction of the (aligned) training fold to reserve as held-out inner
+        validation.  Default is ``0.15`` (15 %).  Set to ``0.0`` to disable
+        the inner validation split (no ``"val"`` key will be returned).
+    random_state : int or None
+        Seed for the stratified train/val split.
 
     Returns
     -------
-    X_dict : dict with keys ``"train"`` and ``"test"``
-    Y_dict : dict with keys ``"train"`` and ``"test"``
+    X_dict : dict
+        Keys: ``"train"``, ``"test"``, and (when ``frac_inner_val > 0``)
+        ``"val"``.  Each value is an array of shape ``(n, s, s)``.
+    Y_dict : dict
+        Same key structure as ``X_dict``; values are integer label arrays.
+
+    Notes
+    -----
+    The inner validation set is never used to estimate the alignment
+    reference ``M``, to compute CSP filters, or to update GP parameters.
+    It is used exclusively as the model-selection and early-stopping signal,
+    providing a criterion that is independent of both the training objective
+    and the held-out test fold.
     """
+    from sklearn.model_selection import train_test_split as _tts
+
     Xtr = X_cov[train_idx]
     Xte = X_cov[test_idx]
+    ytr = y[train_idx].astype(int)
+    yte = y[test_idx].astype(int)
 
+    # --- Step 1–2: alignment (reference from full training fold) ------------ #
     if alignment is not None:
+        # align_split computes M from Xtr and applies W = M^{-1/2} to both.
+        # Xtr is the full training fold here, so M is maximally stable.
         Xtr, Xte, _ = align_split(Xtr, Xte, method=alignment)
+    # After this point Xtr is aligned. Xte is aligned with the same M.
+
+    # --- Step 3: carve inner validation from the (already aligned) training -- #
+    if frac_inner_val > 0.0:
+        Xtr_inner, Xval, ytr_inner, yval = _tts(
+            Xtr, ytr,
+            test_size    = frac_inner_val,
+            random_state = random_state,
+            stratify     = ytr,
+        )
+        return (
+            {"train": Xtr_inner, "val": Xval,  "test": Xte},
+            {"train": ytr_inner, "val": yval,   "test": yte},
+        )
 
     return (
         {"train": Xtr, "test": Xte},
-        {"train": y[train_idx].astype(int), "test": y[test_idx].astype(int)},
+        {"train": ytr, "test": yte},
     )
 
 # ===========================================================================
@@ -643,6 +705,21 @@ def build_argparser() -> argparse.ArgumentParser:
                         help="Total SCG steps for the default single-stage schedule. "
                              "Ignored when --optimizer-stages is provided.")
 
+    # ---- Inner validation split ----
+    parser.add_argument(
+        "--inner-val-frac",
+        type    = float,
+        default = 0.15,
+        help    = (
+            "Fraction of each training fold to hold out as an inner validation "
+            "set used for model selection and early stopping (default: 0.15). "
+            "Alignment is estimated on the full training fold before this split "
+            "is made, so the validation set is automatically aligned with the "
+            "same reference.  Set to 0 to disable the inner validation split "
+            "and fall back to NLML-based early stopping."
+        ),
+    )
+
     # ---- Early stopping ----
     parser.add_argument("--es-patience", type=int, default=0,
                         help="Early-stopping patience (0 = disabled).")
@@ -763,7 +840,10 @@ def main() -> None:
             test_idx  = fold_dict["test_idx"]
 
             X_dict, Y_dict = generate_train_test_from_fold(
-                data["X"], data["Y"], train_idx, test_idx, alignment=alignment
+                data["X"], data["Y"], train_idx, test_idx,
+                alignment      = alignment,
+                frac_inner_val = float(args.inner_val_frac),
+                random_state   = int(args.random_state),
             )
 
             X_train = X_dict["train"]
