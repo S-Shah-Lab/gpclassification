@@ -720,9 +720,9 @@ def plot_individual_panels(
     # ── legend geometry — right-side external box ────────────────────────────
     # The legend lives outside the axes on the right.  The figure width
     # is extended to accommodate it; more series → wider legend column.
-    legend_col_width = 2.6        # inches per legend text column
-    legend_ncols     = 1 if n_s <= 5 else 2
-    legend_extra_w   = legend_col_width * legend_ncols + 0.4
+    legend_col_width = 2.6        # inches reserved for the single legend column
+    legend_ncols     = 1          # keep legend entries stacked in one column
+    legend_extra_w   = legend_col_width + 0.4
     data_area_w      = 7.2 if n_s <= 6 else 8.0
     fig_width        = data_area_w + legend_extra_w
     fig_height       = 5.6
@@ -898,7 +898,13 @@ def plot_individual_panels(
                 labelpad=9, fontsize=12, color="#333344",
             )
 
-            if root in _BOUNDED_ROOTS:
+            if root in {"acc", "aucroc"}:
+                # Accuracy and AUC-ROC are usually only informative above chance.
+                # Keep the true signed/raw values; this only changes the displayed range.
+                ax.set_ylim(0.5, 1.0)
+                ax.yaxis.set_major_locator(mticker.MultipleLocator(0.1))
+                ax.yaxis.set_minor_locator(mticker.MultipleLocator(0.05))
+            elif root == "brier":
                 ax.set_ylim(-0.02, 1.06)
                 ax.yaxis.set_major_locator(mticker.MultipleLocator(0.1))
                 ax.yaxis.set_minor_locator(mticker.MultipleLocator(0.05))
