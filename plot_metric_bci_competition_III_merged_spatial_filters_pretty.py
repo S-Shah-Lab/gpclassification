@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import os
 import json
+import csv
 import argparse
 import textwrap
 from pathlib import Path
@@ -218,6 +219,121 @@ def get_result_dict(root: str) -> Dict[int, Dict[str, list]]:
         result[nf_int] = buckets
 
     return result
+
+
+def get_export_rows(root: str, label: str) -> List[Dict[str, Union[str, int, float, None]]]:
+    """
+    Walk *root* using the same ``nf_*/fold_*/[run_*/]run_log.json`` logic used
+    for plotting and return one CSV-ready row per selected fold log.
+
+    The metric values are the exact values pulled from the ``best_iter`` entry
+    selected by ``_resolve_best_log``; if ``best_iter`` is missing or not found,
+    the final log entry is used, matching the plotting code.
+    """
+    rows: List[Dict[str, Union[str, int, float, None]]] = []
+
+    for nf_name in sorted(os.listdir(root)):
+        nf_path = os.path.join(root, nf_name)
+        if not os.path.isdir(nf_path):
+            continue
+        parts = nf_name.split("_")
+        try:
+            nf_int = int(parts[1])
+        except (IndexError, ValueError):
+            continue
+
+        for fold_name in sorted(os.listdir(nf_path)):
+            fold_path = os.path.join(nf_path, fold_name)
+            if not os.path.isdir(fold_path):
+                continue
+
+            metrics_path = os.path.join(fold_path, "run_log.json")
+            selected_run_dir = ""
+            if not os.path.isfile(metrics_path):
+                run_subdirs = sorted([
+                    d for d in os.listdir(fold_path)
+                    if os.path.isdir(os.path.join(fold_path, d))
+                ])
+                for sub in reversed(run_subdirs):
+                    candidate = os.path.join(fold_path, sub, "run_log.json")
+                    if os.path.isfile(candidate):
+                        metrics_path = candidate
+                        selected_run_dir = sub
+                        break
+                else:
+                    continue
+
+            with open(metrics_path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+
+            meta = data.get("meta", {})
+            entry = _resolve_best_log(data)
+
+            row: Dict[str, Union[str, int, float, None]] = {
+                "series_label": label,
+                "root": root,
+                "nf": nf_int,
+                "fold": fold_name,
+                "selected_run_dir": selected_run_dir,
+                "run_log_path": metrics_path,
+                "best_iter": meta.get("best_iter", None),
+                "selected_step": entry.get("step", None),
+                "n_train": meta.get("n_train", meta.get("N_train", None)),
+                "n_test": meta.get("n_test", meta.get("N_test", None)),
+            }
+
+            # Add path-derived factors when possible. These are useful for
+            # downstream statistical models and avoid re-parsing paths later.
+            segments = _path_segments(root)
+            for token in (
+                "no_align", "euclidean_align", "riemann_align",
+                "kernel_rbf", "kernel_linear",
+                "spatialFilter_trainable", "spatialFilter_fixed",
+                "ard_True", "ard_False",
+                "shuffle_True", "shuffle_False",
+            ):
+                if token in segments:
+                    if token.endswith("_align") or token == "no_align":
+                        row["alignment"] = token
+                    elif token.startswith("kernel_"):
+                        row["kernel"] = token.replace("kernel_", "")
+                    elif token.startswith("spatialFilter_"):
+                        row["spatial_filter"] = token.replace("spatialFilter_", "")
+                    elif token.startswith("ard_"):
+                        row["ard"] = token.replace("ard_", "")
+                    elif token.startswith("shuffle_"):
+                        row["shuffle"] = token.replace("shuffle_", "")
+
+            for key in _METRIC_KEYS:
+                val = entry.get(key, None)
+                row[key] = float(val) if val is not None else None
+
+            rows.append(row)
+
+    return rows
+
+
+def write_export_csv(
+    rows: List[Dict[str, Union[str, int, float, None]]],
+    csv_path: Union[str, Path],
+) -> None:
+    """Write the plot-source rows to a CSV file with a stable column order."""
+    csv_path = Path(csv_path).expanduser().resolve()
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+
+    base_columns = [
+        "series_label", "root", "nf", "fold", "selected_run_dir",
+        "run_log_path", "best_iter", "selected_step", "n_train", "n_test",
+        "alignment", "kernel", "spatial_filter", "ard", "shuffle",
+    ]
+    fieldnames = base_columns + _METRIC_KEYS
+
+    with open(csv_path, "w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
+
+    print(f"  Saved CSV data → {csv_path}")
 
 
 # ---------------------------------------------------------------------------
@@ -1018,6 +1134,22 @@ def build_argparser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--csv-name",
+        default="plot_data.csv",
+        metavar="FILENAME",
+        help=(
+            "Name of the CSV file containing the exact fold-level values used "
+            "to generate the plots. Written inside --save-dir when --save-dir "
+            "is provided, otherwise written to the current working directory."
+        ),
+    )
+    parser.add_argument(
+        "--no-csv",
+        action="store_true",
+        help="Disable CSV export of the fold-level values used for plotting.",
+    )
+
+    parser.add_argument(
         "--dpi",
         type=int,
         default=150,
@@ -1048,6 +1180,18 @@ def main() -> None:
     for path, label in zip(roots, labels):
         print(f"\nLoading '{label}'  ({path})")
         all_buckets[label] = get_result_dict(path)
+
+    # ── export exact fold-level values used for plotting ─────────────────────
+    if not args.no_csv:
+        export_rows: List[Dict[str, Union[str, int, float, None]]] = []
+        for path, label in zip(roots, labels):
+            export_rows.extend(get_export_rows(path, label))
+
+        if args.save_dir:
+            csv_path = Path(args.save_dir).expanduser().resolve() / args.csv_name
+        else:
+            csv_path = Path.cwd() / args.csv_name
+        write_export_csv(export_rows, csv_path)
 
     # ── infer fold count and dataset sizes ───────────────────────────────────
     k_fold: Union[int, str] = "?"
